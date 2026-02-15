@@ -1,0 +1,2 @@
+This is data embedded directly into the binary by Rust!
+It works seamlessly with C++.
