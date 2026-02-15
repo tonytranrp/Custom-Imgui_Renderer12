@@ -21,7 +21,11 @@ namespace RenderUtils {
 
         RenderCallback OnRender;
 
-        CustomComponent(RenderCallback callback) : OnRender(callback) {}
-    };
+        CustomComponent(RenderCallback callback = nullptr) : OnRender(callback) {}
 
+        CustomComponent& SetOnRender(RenderCallback callback) {
+            OnRender = callback;
+            return *this;
+        }
+    };
 }

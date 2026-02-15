@@ -45,4 +45,7 @@ namespace DX12Init {
     FrameContext* WaitForNextFrameResources();
     void ResizeSwapChain(HWND hWnd, int width, int height);
     
+    // Descriptor Management
+    D3D12_CPU_DESCRIPTOR_HANDLE GetCpuSrvHandle(int index);
+    D3D12_GPU_DESCRIPTOR_HANDLE GetGpuSrvHandle(int index);
 }

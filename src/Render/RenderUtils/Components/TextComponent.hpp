@@ -97,6 +97,10 @@ namespace RenderUtils {
         void AddSpan(const std::string& text, ImU32 color, TextStyle style = TextStyle::Normal) {
             Spans.emplace_back(text, color, style);
         }
+
+        // --- Per-Character Animation ---
+        // Callback: index, char, position(in/out), rotation(in/out), color(in/out), scale(in/out)
+        std::function<void(int index, char c, ImVec2& pos, float& rotation, ImU32& color, float& scale)> CharacterTransformCallback;
         
         // Helper accessors for backward compatibility logic inside Renderer
         bool Wrap() const { return HasFlag(Flags, TextFlags::Wrap); }

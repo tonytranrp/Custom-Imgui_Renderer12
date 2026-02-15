@@ -107,6 +107,7 @@ add_executable(ImGuiDX12App
     src/MainRendering.hpp
     src/Dx12Init/Dx12Init.cpp
     src/Dx12Init/Dx12Init.hpp
+    src/Dx12Init/Dx12Helper.cpp
     src/Render/ImguiRender.cpp
     src/Render/ImguiRender.hpp
     src/Render/RenderUtils/UIRenderer.cpp
@@ -122,6 +123,7 @@ target_link_libraries(ImGuiDX12App PRIVATE
     d3d12.lib 
     dxgi.lib 
     d3dcompiler.lib
+    dxguid.lib
     ws2_32.lib
     userenv.lib
     bcrypt.lib

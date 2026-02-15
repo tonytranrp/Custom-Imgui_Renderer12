@@ -17,5 +17,9 @@
 #include "Components/DrawAboveComponent.hpp"
 #include "Components/TextInputComponent.hpp"
 #include "Components/SliderComponent.hpp"
+#include "Components/TabSwitchComponent.hpp"
+#include "Components/TabTriggerComponent.hpp"
+#include "Components/AnimationComponent.hpp"
+#include "Components/GlowComponent.hpp"
 #include "CustomComponents/CustomComponent.hpp"
 

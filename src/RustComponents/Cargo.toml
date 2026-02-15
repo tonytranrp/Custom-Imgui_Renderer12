@@ -7,3 +7,4 @@ edition = "2021"
 crate-type = ["staticlib"]
 
 [dependencies]
+ureq = "2.9"

@@ -14,7 +14,11 @@ namespace RenderUtils {
         TextInputComponent(const std::string& placeholder = "", size_t maxLength = 256)
             : Buffer(""), Placeholder(placeholder), MaxLength(maxLength), IsFocused(false), CursorPos(0) {}
 
-        TextInputComponent& SetBuffer(const std::string& buffer) { Buffer = buffer; return *this; }
+        TextInputComponent& SetBuffer(const std::string& buffer) { 
+            Buffer = buffer; 
+            CursorPos = (int)Buffer.length(); // Auto-move cursor to end
+            return *this; 
+        }
         TextInputComponent& SetPlaceholder(const std::string& placeholder) { Placeholder = placeholder; return *this; }
         TextInputComponent& SetMaxLength(size_t max) { MaxLength = max; return *this; }
         TextInputComponent& SetOnChange(std::function<void(const std::string&)> callback) { OnChange = callback; return *this; }

@@ -37,9 +37,10 @@ namespace RenderUtils {
         bool  Visible;
         ZOrder Layer; // Renamed from ZIndex and changed type
         int ZIndexInt; // Cached int value for sorting if needed, or just cast Layer
+        bool CalculatedVisible; // Internal: Is this entity effectively visible (considering parents)?
 
         StyleComponent(ImU32 bg = 0, ImU32 border = 0, float borderSize = 0.0f, float rounding = 0.0f, bool visible = true, ZOrder layer = ZOrder::Normal, ImDrawFlags roundingFlags = ImDrawFlags_RoundCornersAll)
-            : BackgroundColor(bg), BorderColor(border), BorderSize(borderSize), Rounding(rounding), Visible(visible), Layer(layer), ZIndexInt(static_cast<int>(layer)), RoundingFlags(roundingFlags) {}
+            : BackgroundColor(bg), BorderColor(border), BorderSize(borderSize), Rounding(rounding), Visible(visible), Layer(layer), ZIndexInt(static_cast<int>(layer)), RoundingFlags(roundingFlags), CalculatedVisible(visible) {}
 
         StyleComponent& SetBackgroundColor(ImU32 color) { BackgroundColor = color; return *this; }
         StyleComponent& SetBorderColor(ImU32 color) { BorderColor = color; return *this; }
