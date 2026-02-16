@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "imgui.h"
+#include "ShaderComponent.hpp"
 
 namespace RenderUtils {
     enum class ShadowRenderMode {
@@ -23,6 +24,8 @@ namespace RenderUtils {
         bool Inset = false;
         ShadowRenderMode RenderMode = ShadowRenderMode::Cpu;
         std::string ShaderKey = "shadow.default";
+        std::vector<ShaderParameter> ShaderParameters;
+        bool ClipToParent = true;
 
         ShadowComponent() = default;
 
@@ -70,6 +73,151 @@ namespace RenderUtils {
             ShaderKey = key;
             return *this;
         }
+
+        ShadowComponent& SetClipToParent(bool clip) {
+            ClipToParent = clip;
+            return *this;
+        }
+
+        ShadowComponent& SetShaderParameters(const std::vector<ShaderParameter>& params) {
+            ShaderParameters = params;
+            return *this;
+        }
+
+        ShadowComponent& ConfigureShaderParameters(const ShaderParamBuilder& builder) {
+            ShaderParameters = builder.Parameters();
+            return *this;
+        }
+
+        ShadowComponent& ClearShaderParameters() {
+            ShaderParameters.clear();
+            return *this;
+        }
+
+        ShadowComponent& ParamFloat(const std::string& name, float value) {
+            UpsertShaderParameter(name, ShaderParamType::Float, value, ShaderBindingMode::Literal, {}, ShaderAutoUniform::None);
+            return *this;
+        }
+
+        ShadowComponent& ParamInt(const std::string& name, int value) {
+            UpsertShaderParameter(name, ShaderParamType::Int, value, ShaderBindingMode::Literal, {}, ShaderAutoUniform::None);
+            return *this;
+        }
+
+        ShadowComponent& ParamVec2(const std::string& name, const ImVec2& value) {
+            UpsertShaderParameter(name, ShaderParamType::Vec2, value, ShaderBindingMode::Literal, {}, ShaderAutoUniform::None);
+            return *this;
+        }
+
+        ShadowComponent& ParamVec4(const std::string& name, const ImVec4& value) {
+            UpsertShaderParameter(name, ShaderParamType::Vec4, value, ShaderBindingMode::Literal, {}, ShaderAutoUniform::None);
+            return *this;
+        }
+
+        ShadowComponent& ParamColor(const std::string& name, ImU32 value) {
+            UpsertShaderParameter(name, ShaderParamType::Color, value, ShaderBindingMode::Literal, {}, ShaderAutoUniform::None);
+            return *this;
+        }
+
+        ShadowComponent& ParamBool(const std::string& name, bool value) {
+            UpsertShaderParameter(name, ShaderParamType::Bool, value, ShaderBindingMode::Literal, {}, ShaderAutoUniform::None);
+            return *this;
+        }
+
+        ShadowComponent& ParamAutoFloat(const std::string& name, ShaderAutoUniform binding, float fallback = 0.0f) {
+            UpsertShaderParameter(name, ShaderParamType::Float, fallback, ShaderBindingMode::BuiltinAutoUniform, {}, binding);
+            return *this;
+        }
+
+        ShadowComponent& ParamAutoVec2(const std::string& name, ShaderAutoUniform binding, const ImVec2& fallback = ImVec2(0.0f, 0.0f)) {
+            UpsertShaderParameter(name, ShaderParamType::Vec2, fallback, ShaderBindingMode::BuiltinAutoUniform, {}, binding);
+            return *this;
+        }
+
+        ShadowComponent& ParamAutoVec4(const std::string& name, ShaderAutoUniform binding, const ImVec4& fallback = ImVec4(0.0f, 0.0f, 0.0f, 0.0f)) {
+            UpsertShaderParameter(name, ShaderParamType::Vec4, fallback, ShaderBindingMode::BuiltinAutoUniform, {}, binding);
+            return *this;
+        }
+
+        ShadowComponent& ParamBindFloat(const std::string& name, const std::string& uniformKey, float fallback = 0.0f) {
+            UpsertShaderParameter(name, ShaderParamType::Float, fallback, ShaderBindingMode::RegisteredAutoUniform, uniformKey, ShaderAutoUniform::None);
+            return *this;
+        }
+
+        ShadowComponent& ParamBindInt(const std::string& name, const std::string& uniformKey, int fallback = 0) {
+            UpsertShaderParameter(name, ShaderParamType::Int, fallback, ShaderBindingMode::RegisteredAutoUniform, uniformKey, ShaderAutoUniform::None);
+            return *this;
+        }
+
+        ShadowComponent& ParamBindVec2(const std::string& name, const std::string& uniformKey, const ImVec2& fallback = ImVec2(0.0f, 0.0f)) {
+            UpsertShaderParameter(name, ShaderParamType::Vec2, fallback, ShaderBindingMode::RegisteredAutoUniform, uniformKey, ShaderAutoUniform::None);
+            return *this;
+        }
+
+        ShadowComponent& ParamBindVec4(const std::string& name, const std::string& uniformKey, const ImVec4& fallback = ImVec4(0.0f, 0.0f, 0.0f, 0.0f)) {
+            UpsertShaderParameter(name, ShaderParamType::Vec4, fallback, ShaderBindingMode::RegisteredAutoUniform, uniformKey, ShaderAutoUniform::None);
+            return *this;
+        }
+
+        ShadowComponent& ParamBindColor(const std::string& name, const std::string& uniformKey, ImU32 fallback = IM_COL32(255, 255, 255, 255)) {
+            UpsertShaderParameter(name, ShaderParamType::Color, fallback, ShaderBindingMode::RegisteredAutoUniform, uniformKey, ShaderAutoUniform::None);
+            return *this;
+        }
+
+        ShadowComponent& ParamBindBool(const std::string& name, const std::string& uniformKey, bool fallback = false) {
+            UpsertShaderParameter(name, ShaderParamType::Bool, fallback, ShaderBindingMode::RegisteredAutoUniform, uniformKey, ShaderAutoUniform::None);
+            return *this;
+        }
+
+    private:
+        static std::string SanitizeParamName(const std::string& name) {
+            if (name.empty()) {
+                return "Param";
+            }
+            std::string out = name;
+            for (size_t i = 0; i < out.size(); ++i) {
+                const unsigned char ch = static_cast<unsigned char>(out[i]);
+                const bool alphaNum = (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9');
+                if (!(alphaNum || ch == '_')) {
+                    out[i] = '_';
+                }
+            }
+            const unsigned char first = static_cast<unsigned char>(out[0]);
+            if (!((first >= 'a' && first <= 'z') || (first >= 'A' && first <= 'Z') || first == '_')) {
+                out.insert(out.begin(), '_');
+            }
+            return out;
+        }
+
+        void UpsertShaderParameter(
+            const std::string& rawName,
+            ShaderParamType type,
+            const ShaderParamValue& value,
+            ShaderBindingMode bindingMode,
+            const std::string& uniformKey,
+            ShaderAutoUniform autoUniform) {
+            const std::string safeName = SanitizeParamName(rawName);
+            for (auto& param : ShaderParameters) {
+                if (param.Name == safeName) {
+                    param.Type = type;
+                    param.Value = value;
+                    param.BindingMode = bindingMode;
+                    param.UniformKey = uniformKey;
+                    param.AutoUniform = autoUniform;
+                    return;
+                }
+            }
+
+            ShaderParameter param;
+            param.Name = safeName;
+            param.Type = type;
+            param.Value = value;
+            param.BindingMode = bindingMode;
+            param.UniformKey = uniformKey;
+            param.AutoUniform = autoUniform;
+            ShaderParameters.push_back(std::move(param));
+        }
+
     };
 
     namespace ShadowSystem {

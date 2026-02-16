@@ -1,5 +1,8 @@
+#![deny(unused_must_use)]
+#![deny(warnings)]
+
 use std::collections::HashMap;
-use std::ffi::{CStr, CString};
+use std::ffi::CStr;
 use std::io::{Cursor, Read};
 use std::os::raw::c_char;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -10,9 +13,6 @@ use std::time::Duration;
 use image::codecs::gif::GifDecoder;
 use image::{AnimationDecoder, ImageFormat};
 use lazy_static::lazy_static;
-
-// Embed a file as a byte array
-const EMBEDDED_DATA: &[u8] = include_bytes!("../assets/rust_data.txt");
 
 #[repr(i32)]
 enum FetchStatusCode {
@@ -177,32 +177,6 @@ fn decode_media(bytes: &[u8]) -> Result<FetchMediaResult, String> {
     })
 }
 
-#[no_mangle]
-pub extern "C" fn get_embedded_data(length: *mut usize) -> *const u8 {
-    unsafe {
-        if !length.is_null() {
-            *length = EMBEDDED_DATA.len();
-        }
-    }
-    EMBEDDED_DATA.as_ptr()
-}
-
-#[no_mangle]
-pub extern "C" fn get_rust_greeting() -> *mut c_char {
-    let s = CString::new("Hello from Rust! (via Corrosion)").unwrap();
-    s.into_raw()
-}
-
-#[no_mangle]
-pub extern "C" fn free_rust_string(s: *mut c_char) {
-    if s.is_null() {
-        return;
-    }
-    unsafe {
-        let _ = CString::from_raw(s);
-    }
-}
-
 // Fetch URL Data
 #[no_mangle]
 pub extern "C" fn fetch_url_data(url: *const c_char, out_len: *mut usize) -> *mut u8 {
@@ -210,6 +184,7 @@ pub extern "C" fn fetch_url_data(url: *const c_char, out_len: *mut usize) -> *mu
         return std::ptr::null_mut();
     }
 
+    // SAFETY: `url` is validated as non-null above and expected to be a valid C string.
     let c_str = unsafe { CStr::from_ptr(url) };
     let url_str = match c_str.to_str() {
         Ok(s) => s,
@@ -221,6 +196,7 @@ pub extern "C" fn fetch_url_data(url: *const c_char, out_len: *mut usize) -> *mu
             let mut reader = response.into_reader();
             let mut bytes = Vec::new();
             if std::io::copy(&mut reader, &mut bytes).is_ok() {
+                // SAFETY: `out_len` is optional and only written when non-null.
                 unsafe {
                     if !out_len.is_null() {
                         *out_len = bytes.len();
@@ -244,6 +220,7 @@ pub extern "C" fn free_rust_bytes(ptr: *mut u8, len: usize) {
     if ptr.is_null() {
         return;
     }
+    // SAFETY: `ptr`/`len` must come from `fetch_url_data` allocation contract.
     unsafe {
         let slice_ptr = std::ptr::slice_from_raw_parts_mut(ptr, len);
         let _ = Box::from_raw(slice_ptr);
@@ -256,6 +233,7 @@ pub extern "C" fn start_fetch_media(source: *const c_char, source_kind: i32) -> 
         return 0;
     }
 
+    // SAFETY: `source` is validated as non-null above and expected to be valid UTF-8 C string.
     let c_str = unsafe { CStr::from_ptr(source) };
     let source_str = match c_str.to_str() {
         Ok(s) => s.to_string(),
@@ -296,6 +274,7 @@ pub extern "C" fn check_fetch_media_status_ex(
     out_frames: *mut *mut AnimatedFrameFFI,
     out_frame_count: *mut usize,
 ) -> i32 {
+    // SAFETY: Output pointers are optional and each is checked for null before write.
     unsafe {
         if !out_media_kind.is_null() {
             *out_media_kind = MediaKind::StaticRgba as i32;
@@ -355,6 +334,7 @@ pub extern "C" fn check_fetch_media_status_ex(
                     let ptr = boxed_slice.as_mut_ptr();
                     std::mem::forget(boxed_slice);
 
+                    // SAFETY: Output pointers are optional and checked before write.
                     unsafe {
                         if !out_media_kind.is_null() {
                             *out_media_kind = MediaKind::StaticRgba as i32;
@@ -401,6 +381,7 @@ pub extern "C" fn check_fetch_media_status_ex(
                     let frame_ptr = boxed_frames.as_mut_ptr();
                     std::mem::forget(boxed_frames);
 
+                    // SAFETY: Output pointers are optional and checked before write.
                     unsafe {
                         if !out_media_kind.is_null() {
                             *out_media_kind = MediaKind::AnimatedRgba as i32;
@@ -448,6 +429,7 @@ pub extern "C" fn check_fetch_status_ex(
     );
 
     if status != FetchStatusCode::Ready as i32 {
+        // SAFETY: `out_data` is optional and checked before write.
         unsafe {
             if !out_data.is_null() {
                 *out_data = std::ptr::null_mut();
@@ -457,6 +439,7 @@ pub extern "C" fn check_fetch_status_ex(
     }
 
     if media_kind == MediaKind::StaticRgba as i32 {
+        // SAFETY: Output pointers are optional and checked before write.
         unsafe {
             if !out_data.is_null() {
                 *out_data = static_data;
@@ -478,6 +461,7 @@ pub extern "C" fn check_fetch_status_ex(
         return FetchStatusCode::Failed as i32;
     }
 
+    // SAFETY: `frames_ptr`/`frame_count` originate from `check_fetch_media_status_ex` allocation path.
     unsafe {
         let boxed_frames =
             Box::from_raw(std::ptr::slice_from_raw_parts_mut(frames_ptr, frame_count));
@@ -531,6 +515,7 @@ pub extern "C" fn free_image_data(ptr: *mut u8, len: usize) {
     if ptr.is_null() {
         return;
     }
+    // SAFETY: `ptr`/`len` must come from this crate's image allocation APIs.
     unsafe {
         let _ = Vec::from_raw_parts(ptr, len, len);
     }
@@ -542,6 +527,7 @@ pub extern "C" fn free_animation_frames(frames: *mut AnimatedFrameFFI, frame_cou
         return;
     }
 
+    // SAFETY: `frames`/`frame_count` must come from `check_fetch_media_status_ex`.
     unsafe {
         let slice = std::slice::from_raw_parts_mut(frames, frame_count);
         for frame in slice.iter_mut() {

@@ -305,6 +305,7 @@ namespace RenderUtils {
                     if (ImGui::InputText("Shader Key##Glow", glowShaderKey.data(), glowShaderKey.size())) {
                         glow.ShaderKey = glowShaderKey.data();
                     }
+                    ImGui::Checkbox("Clip To Parent##Glow", &glow.ClipToParent);
                     if (ImGui::DragFloat("Radius", &glow.Radius, 1.0f, 0.0f, 100.0f)) {
                         glow.MarkCacheDirty();
                     }
@@ -371,6 +372,7 @@ namespace RenderUtils {
                     if (ImGui::InputText("Shader Key##Shadow", shadowShaderKey.data(), shadowShaderKey.size())) {
                         shadow.ShaderKey = shadowShaderKey.data();
                     }
+                    ImGui::Checkbox("Clip To Parent##Shadow", &shadow.ClipToParent);
                     ImVec4 shadowCol = ImColor(shadow.Color);
                     if (ImGui::ColorEdit4("Shadow Color", (float*)&shadowCol)) {
                         shadow.Color = ImColor(shadowCol);
@@ -414,7 +416,8 @@ namespace RenderUtils {
                         shader.PixelSource.Mode = static_cast<ShaderSourceMode>(sourceMode);
                         shader.Dirty = true;
                     }
-                    ImGui::TextDisabled("File-only policy: Embedded* modes resolve alias keys to files.");
+                    ImGui::TextDisabled("Embedded* modes resolve compile-time keys (with optional file-alias fallback).");
+                    ImGui::TextDisabled("File mode resolves runtime paths.");
                     if (shader.PixelSource.Mode == ShaderSourceMode::Inline) {
                         ImGui::TextColored(ImVec4(1.0f, 0.72f, 0.38f, 1.0f), "Inline source is disabled by policy.");
                     }
@@ -473,6 +476,8 @@ namespace RenderUtils {
                     }
 
                     ImGui::SeparatorText("Parameters");
+                    std::vector<std::string> uniformResolverKeys;
+                    ShaderSystem::QueryUniformResolverKeys(uniformResolverKeys);
                     int removeParamIndex = -1;
                     for (size_t i = 0; i < shader.Parameters.size(); ++i) {
                         ImGui::PushID(static_cast<int>(i));
@@ -498,7 +503,66 @@ namespace RenderUtils {
                             case ShaderParamType::Color: param.Value = IM_COL32(255, 255, 255, 255); break;
                             case ShaderParamType::Bool: param.Value = false; break;
                             }
+                            param.BindingMode = ShaderBindingMode::Literal;
+                            param.AutoUniform = ShaderAutoUniform::None;
+                            param.UniformKey.clear();
                             shader.Dirty = true;
+                        }
+
+                        ShaderBindingMode effectiveBinding = param.BindingMode;
+                        if (effectiveBinding == ShaderBindingMode::Literal &&
+                            param.AutoUniform != ShaderAutoUniform::None) {
+                            effectiveBinding = ShaderBindingMode::BuiltinAutoUniform;
+                            param.BindingMode = effectiveBinding;
+                        }
+
+                        int bindingMode = static_cast<int>(effectiveBinding);
+                        const char* bindingModes[] = { "Literal", "Builtin", "Registered Key" };
+                        if (ImGui::Combo("Binding Mode", &bindingMode, bindingModes, 3)) {
+                            param.BindingMode = static_cast<ShaderBindingMode>(bindingMode);
+                            shader.Dirty = true;
+                        }
+
+                        if (param.BindingMode == ShaderBindingMode::BuiltinAutoUniform) {
+                            int autoUniformBinding = static_cast<int>(param.AutoUniform);
+                            const char* autoBindings[] = {
+                                "None",
+                                "TimeSeconds",
+                                "DeltaSeconds",
+                                "MousePos",
+                                "DisplaySize",
+                                "EntityMin",
+                                "EntityMax",
+                                "EntitySize",
+                                "EntityRect"
+                            };
+                            if (ImGui::Combo("Builtin Uniform", &autoUniformBinding, autoBindings, 9)) {
+                                param.AutoUniform = static_cast<ShaderAutoUniform>(autoUniformBinding);
+                                shader.Dirty = true;
+                            }
+                            ImGui::TextDisabled("Builtin auto uniform active; value below is fallback on type mismatch.");
+                        } else if (param.BindingMode == ShaderBindingMode::RegisteredAutoUniform) {
+                            std::array<char, 128> uniformKeyBuf{};
+                            std::strncpy(uniformKeyBuf.data(), param.UniformKey.c_str(), uniformKeyBuf.size() - 1);
+                            if (ImGui::InputText("Uniform Key", uniformKeyBuf.data(), uniformKeyBuf.size())) {
+                                param.UniformKey = uniformKeyBuf.data();
+                                shader.Dirty = true;
+                            }
+
+                            if (ImGui::BeginCombo("Registered Keys", param.UniformKey.empty() ? "<none>" : param.UniformKey.c_str())) {
+                                for (const auto& key : uniformResolverKeys) {
+                                    const bool selected = (key == param.UniformKey);
+                                    if (ImGui::Selectable(key.c_str(), selected)) {
+                                        param.UniformKey = key;
+                                        shader.Dirty = true;
+                                    }
+                                    if (selected) {
+                                        ImGui::SetItemDefaultFocus();
+                                    }
+                                }
+                                ImGui::EndCombo();
+                            }
+                            ImGui::TextDisabled("Registered uniform active; value below is fallback on resolver failure.");
                         }
 
                         switch (param.Type) {
@@ -579,6 +643,9 @@ namespace RenderUtils {
                         param.Name = "Param" + std::to_string(shader.Parameters.size());
                         param.Type = ShaderParamType::Float;
                         param.Value = 0.0f;
+                        param.BindingMode = ShaderBindingMode::Literal;
+                        param.AutoUniform = ShaderAutoUniform::None;
+                        param.UniformKey.clear();
                         shader.Parameters.push_back(std::move(param));
                         shader.Dirty = true;
                     }
@@ -894,6 +961,13 @@ namespace RenderUtils {
         Components::ImageLoaderSystem::Register(registry);
     }
 
+    void UIRenderer::Shutdown(entt::registry& registry) {
+        Components::ImageLoaderSystem::Shutdown(registry);
+        s_SelectedEntity = entt::null;
+        s_HoveredDebugEntity = entt::null;
+        s_CurrentTabId = 0;
+    }
+
     void UIRenderer::FreeImageResource(entt::registry& registry, entt::entity entity) {
         Components::ImageLoaderSystem::FreeEntity(registry, entity);
     }
@@ -1053,7 +1127,7 @@ namespace RenderUtils {
             changed = false;
             iteration++;
 
-            view.each([&](const auto entity, const auto& drawAbove, auto& style) {
+            view.each([&](const auto, const auto& drawAbove, auto& style) {
                 if (drawAbove.TargetEntityName && drawAbove.TargetEntityName[0] != '\0') {
                     // Fast Lookup
                     auto it = nameToEntity.find(drawAbove.TargetEntityName);
@@ -2070,5 +2144,64 @@ namespace RenderUtils {
 
         return entity;
     }
+
+    namespace StartupRuntime {
+        void Reset(State& state) {
+            state = State{};
+        }
+
+        void Update(entt::registry& registry, float deltaTime, const Config& config, State& state) {
+            if (!state.Initialized) {
+                state.Initialized = true;
+                state.Completed = (config.ModeValue == Mode::ImmediateUI);
+                state.TimedOut = false;
+                state.StartTimeSec = static_cast<float>(ImGui::GetTime());
+                state.ElapsedSec = 0.0f;
+                state.SummaryLine.clear();
+            }
+
+            const float nowSec = static_cast<float>(ImGui::GetTime());
+            state.ElapsedSec = (std::max)(0.0f, nowSec - state.StartTimeSec);
+
+            if (config.ModeValue == Mode::BlockOnRequiredImages && !state.Completed) {
+                if (config.PriorityValue == Priority::ImagesFirst) {
+                    Components::ImageLoaderSystem::Update(registry);
+                    UIRenderer::ResolveTransforms(registry);
+                    UIRenderer::ResolveDepth(registry);
+                } else {
+                    UIRenderer::Update(registry, deltaTime);
+                }
+
+                state.Progress = Components::ImageLoaderSystem::QueryProgress(registry);
+                if (state.Progress.done) {
+                    state.Completed = true;
+                    state.SummaryLine =
+                        "Startup complete: " + std::to_string(state.Progress.readyRequired) + " ready, " +
+                        std::to_string(state.Progress.failedRequired) + " failed.";
+                    return;
+                }
+
+                const float timeoutSec = (std::max)(1.0f, config.TimeoutSeconds);
+                if (state.ElapsedSec >= timeoutSec) {
+                    state.Completed = true;
+                    state.TimedOut = true;
+                    state.SummaryLine =
+                        "Startup timeout after " + std::to_string(static_cast<int>(timeoutSec)) + "s: " +
+                        std::to_string(state.Progress.readyRequired) + " ready, " +
+                        std::to_string(state.Progress.failedRequired) + " failed, " +
+                        std::to_string(state.Progress.loadingRequired) + " still loading.";
+                }
+                return;
+            }
+
+            UIRenderer::Update(registry, deltaTime);
+            state.Progress = Components::ImageLoaderSystem::QueryProgress(registry);
+            if (state.Completed && state.SummaryLine.empty()) {
+                state.SummaryLine =
+                    "Startup complete: " + std::to_string(state.Progress.readyRequired) + " ready, " +
+                    std::to_string(state.Progress.failedRequired) + " failed.";
+            }
+        }
+    } // namespace StartupRuntime
 
 }

@@ -4,9 +4,42 @@
 #include "imgui.h"
 #include "UIComponents.hpp" // Added include for Component definitions
 
+#include <string>
 #include <vector>
 
 namespace RenderUtils {
+
+    namespace StartupRuntime {
+        enum class Mode {
+            BlockOnRequiredImages = 0,
+            ImmediateUI = 1
+        };
+
+        enum class Priority {
+            ImagesFirst = 0,
+            SystemsFirst = 1,
+            Balanced = 2
+        };
+
+        struct Config {
+            Mode ModeValue = Mode::BlockOnRequiredImages;
+            Priority PriorityValue = Priority::ImagesFirst;
+            float TimeoutSeconds = 15.0f;
+        };
+
+        struct State {
+            bool Initialized = false;
+            bool Completed = false;
+            bool TimedOut = false;
+            float StartTimeSec = 0.0f;
+            float ElapsedSec = 0.0f;
+            Components::ImageLoaderProgress Progress;
+            std::string SummaryLine;
+        };
+
+        void Reset(State& state);
+        void Update(entt::registry& registry, float deltaTime, const Config& config, State& state);
+    } // namespace StartupRuntime
 
     class UIRenderer {
     public:
@@ -14,6 +47,7 @@ namespace RenderUtils {
         static bool DebugMode;
 
         static void Init(entt::registry& registry);
+        static void Shutdown(entt::registry& registry);
 
         static void FreeImageResource(entt::registry& registry, entt::entity entity);
 

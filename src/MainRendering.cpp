@@ -1,20 +1,15 @@
 #include "MainRendering.hpp"
 #include "Dx12Init/Dx12Init.hpp"
-#include "Render/ImguiRender.hpp"
 #include "Render/RenderUtils/UIRenderer.hpp"
 #include "Render/RenderUtils/UIComponents.hpp"
 #include "Render/RenderUtils/UIBuilder.hpp"
 #include "Render/RenderUtils/ShaderSystem.hpp"
 
 #include "imgui.h"
-#include "imgui_impl_win32.h"
-#include <tchar.h>
 #include <algorithm>
 #include <cassert>
 #include <cmath>
 #include <string>
-
-extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
 
 namespace MainRendering {
 
@@ -33,80 +28,73 @@ namespace MainRendering {
 
         bool g_RequestStartupRestart = false;
         bool g_RequestShaderRecompile = false;
-
-        enum class StartupMode {
-            BlockOnRequiredImages = 0,
-            ImmediateUI = 1
-        };
-
-        enum class StartupPriority {
-            ImagesFirst = 0,
-            SystemsFirst = 1,
-            Balanced = 2
-        };
-
-        struct StartupConfig {
-            StartupMode Mode = StartupMode::BlockOnRequiredImages;
-            StartupPriority Priority = StartupPriority::ImagesFirst;
-            float TimeoutSeconds = 15.0f;
-        };
-
-        struct StartupState {
-            bool Initialized = false;
-            bool Completed = false;
-            bool TimedOut = false;
-            float StartTimeSec = 0.0f;
-            float ElapsedSec = 0.0f;
-            Components::ImageLoaderProgress Progress;
-            std::string SummaryLine;
-        };
-    }
-
-    LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
-        if (ImGui_ImplWin32_WndProcHandler(hWnd, msg, wParam, lParam))
-            return true;
-
-        switch (msg) {
-        case WM_SIZE:
-            if (DX12Init::g_pd3dDevice != nullptr && wParam != SIZE_MINIMIZED) {
-                DX12Init::ResizeSwapChain(hWnd, (UINT)LOWORD(lParam), (UINT)HIWORD(lParam));
-            }
-            return 0;
-        case WM_SYSCOMMAND:
-            if ((wParam & 0xfff0) == SC_KEYMENU) // Disable ALT application menu
-                return 0;
-            break;
-        case WM_DESTROY:
-            PostQuitMessage(0);
-            return 0;
-        }
-        return DefWindowProc(hWnd, msg, wParam, lParam);
     }
 
     int Run(HINSTANCE hInstance) {
-        WNDCLASSEX wc = { sizeof(WNDCLASSEX), CS_CLASSDC, WndProc, 0L, 0L, GetModuleHandle(nullptr), nullptr, nullptr, nullptr, nullptr, _T("ImGui DX12 Class"), nullptr };
-        RegisterClassEx(&wc);
-        HWND hWnd = CreateWindow(wc.lpszClassName, _T("ImGui DX12 App"), WS_OVERLAPPEDWINDOW, 100, 100, 1600, 900, nullptr, nullptr, wc.hInstance, nullptr);
+        RenderUtils::StartupRuntime::Config startupConfig;
+        RenderUtils::StartupRuntime::State startupState;
 
-        if (!DX12Init::CreateDeviceD3D(hWnd)) {
-            DX12Init::CleanupDeviceD3D();
-            UnregisterClass(wc.lpszClassName, wc.hInstance);
-            return 1;
-        }
+        DX12Init::RunConfig runConfig;
+        runConfig.Window.ClassName = L"ImGui DX12 Class";
+        runConfig.Window.Title = L"ImGui DX12 App";
+        runConfig.Window.PosX = 100;
+        runConfig.Window.PosY = 100;
+        runConfig.Window.Width = 1600;
+        runConfig.Window.Height = 900;
+        runConfig.Window.WindowStyle = WS_OVERLAPPEDWINDOW;
+        runConfig.Window.ShowCmd = SW_SHOWDEFAULT;
+        runConfig.VSync = true;
+        runConfig.AutoInitImGui = true;
+        runConfig.AutoInitShaderSystem = true;
+        runConfig.AutoShowWindow = true;
 
-        ShowWindow(hWnd, SW_SHOWDEFAULT);
-        UpdateWindow(hWnd);
+        DX12Init::RuntimeCallbacks callbacks;
+        callbacks.OnSetup = [&](HWND) {
+            g_registry.clear();
+            g_RequestStartupRestart = false;
+            g_RequestShaderRecompile = false;
+            startupConfig = RenderUtils::StartupRuntime::Config{};
+            RenderUtils::StartupRuntime::Reset(startupState);
 
-        ImguiRender::Init(hWnd, DX12Init::g_pd3dDevice, DX12Init::NUM_FRAMES_IN_FLIGHT,
-            DXGI_FORMAT_R8G8B8A8_UNORM, DX12Init::g_pd3dSrvDescHeap, DX12Init::g_pd3dCommandQueue);
+            RenderUtils::UIRenderer::Init(g_registry);
+            RenderUtils::ShaderSystem::RegisterUniformResolver(
+            "app.mouse_norm",
+            [](const RenderUtils::ShaderAutoUniformContext& context,
+                RenderUtils::ShaderParamType expectedType,
+                RenderUtils::ShaderParamValue& outValue,
+                std::string& outError) -> bool {
+                const float safeW = (std::max)(1.0f, context.DisplaySize.x);
+                const float safeH = (std::max)(1.0f, context.DisplaySize.y);
+                const ImVec2 mouseNorm = ImVec2(context.MousePos.x / safeW, context.MousePos.y / safeH);
+                if (expectedType == RenderUtils::ShaderParamType::Vec2) {
+                    outValue = mouseNorm;
+                    return true;
+                }
+                if (expectedType == RenderUtils::ShaderParamType::Vec4) {
+                    outValue = ImVec4(mouseNorm.x, mouseNorm.y, 0.0f, 0.0f);
+                    return true;
+                }
+                outError = "Uniform 'app.mouse_norm' expects Vec2 or Vec4.";
+                return false;
+            });
+            RenderUtils::ShaderSystem::RegisterUniformResolver(
+            "app.sin_time",
+            [](const RenderUtils::ShaderAutoUniformContext& context,
+                RenderUtils::ShaderParamType expectedType,
+                RenderUtils::ShaderParamValue& outValue,
+                std::string& outError) -> bool {
+                if (expectedType != RenderUtils::ShaderParamType::Float) {
+                    outError = "Uniform 'app.sin_time' expects Float.";
+                    return false;
+                }
+                outValue = std::sin(context.TimeSeconds);
+                return true;
+            });
+        
 
-        RenderUtils::ShaderSystem::Initialize(DX12Init::g_pd3dDevice);
-        RenderUtils::UIRenderer::Init(g_registry);
-
-
-        // --- UI Construction ---
-        RenderUtils::UIRenderer::SetCurrentTab(static_cast<int>(DemoTab::Overview));
-        RenderUtils::UIBuilder::Begin(g_registry)
+            // --- UI Construction ---
+            RenderUtils::UIRenderer::SetCurrentTab(static_cast<int>(DemoTab::Overview));
+            RenderUtils::UIBuilder::Begin(g_registry)
             .Create<RenderUtils::ContainerType::Panel>("MainContainer")
                 .With<RenderUtils::TransformComponent>(
                     RenderUtils::TransformComponent().SetPosition(ImVec2(0, 0)).SetSize(ImVec2(1600, 900))
@@ -322,8 +310,8 @@ namespace MainRendering {
                                         .Create<RenderUtils::ContainerType::Panel>("ShadowCardObject")
                                         .With<RenderUtils::TransformComponent>(RenderUtils::TransformComponent().SetPosition(ImVec2(70, 110)).SetSize(ImVec2(220, 140)))
                                         .With<RenderUtils::StyleComponent>(RenderUtils::StyleComponent().SetBackgroundColor(IM_COL32(53, 96, 180, 255)).SetRounding(12.0f))
-                                        .With<RenderUtils::ShadowComponent>(RenderUtils::ShadowComponent().SetColor(IM_COL32(0, 0, 0, 135)).SetOffset(ImVec2(10, 12)).SetBlurRadius(22.0f).SetSpread(2.5f).SetSamples(22))
-                                        .With<RenderUtils::ShaderComponent>(RenderUtils::ShaderComponent().SetPixelSource(RenderUtils::ShaderSourceSpec().SetMode(RenderUtils::ShaderSourceMode::File).SetSource("assets/shaders/shadow_default.hlsl").SetTarget("ps_5_0")))
+                                        .With<RenderUtils::ShadowComponent>(RenderUtils::ShadowComponent().SetColor(IM_COL32(0, 0, 0, 135)).SetOffset(ImVec2(10, 12)).SetBlurRadius(22.0f).SetSpread(2.5f).SetSamples(22).ParamBindFloat("u_time", "time", 0.0f))
+                                        .With<RenderUtils::ShaderComponent>(RenderUtils::ShaderComponent().SetPixelSource(RenderUtils::ShaderSourceSpec().SetMode(RenderUtils::ShaderSourceMode::EmbeddedCpp).SetSource("shadow.default").SetTarget("ps_5_0")))
                                         .With<RenderUtils::TextComponent>(RenderUtils::TextComponent("Object A", IM_COL32(255, 255, 255, 255)))
                                     )
                                 )
@@ -332,9 +320,9 @@ namespace MainRendering {
                                     .With<RenderUtils::TransformComponent>(RenderUtils::TransformComponent().SetPosition(ImVec2(648, 18)).SetSize(ImVec2(584, 360)))
                                     .With<RenderUtils::StyleComponent>(RenderUtils::StyleComponent().SetBackgroundColor(IM_COL32(24, 27, 34, 255)).SetRounding(8.0f))
                                     .With<RenderUtils::TextComponent>(RenderUtils::TextComponent("Glow Modes", IM_COL32(220, 230, 245, 255)))
-                                    .Child(RenderUtils::UIBuilder::Begin(g_registry).Create<RenderUtils::ContainerType::Panel>("GlowGaussianCard").With<RenderUtils::TransformComponent>(RenderUtils::TransformComponent().SetPosition(ImVec2(20, 70)).SetSize(ImVec2(170, 230))).With<RenderUtils::StyleComponent>(RenderUtils::StyleComponent().SetBackgroundColor(IM_COL32(48, 54, 64, 255)).SetRounding(10.0f)).With<RenderUtils::GlowComponent>(RenderUtils::GlowComponent(IM_COL32(102, 180, 255, 255), 34.0f, 1.6f).SetMode(RenderUtils::GlowMode::GaussianBloom).SetRenderMode(RenderUtils::GlowRenderMode::Shader)).With<RenderUtils::ShaderComponent>(RenderUtils::ShaderComponent().SetPixelSource(RenderUtils::ShaderSourceSpec().SetMode(RenderUtils::ShaderSourceMode::File).SetSource("assets/shaders/glow_default.hlsl").SetTarget("ps_5_0"))).With<RenderUtils::TextComponent>(RenderUtils::TextComponent("Gaussian", IM_COL32(235, 245, 255, 255)).Align(RenderUtils::TextAlign::Center)))
-                                    .Child(RenderUtils::UIBuilder::Begin(g_registry).Create<RenderUtils::ContainerType::Panel>("GlowNeonCard").With<RenderUtils::TransformComponent>(RenderUtils::TransformComponent().SetPosition(ImVec2(206, 70)).SetSize(ImVec2(170, 230))).With<RenderUtils::StyleComponent>(RenderUtils::StyleComponent().SetBackgroundColor(IM_COL32(45, 52, 61, 255)).SetRounding(10.0f)).With<RenderUtils::GlowComponent>(RenderUtils::GlowComponent(IM_COL32(88, 245, 225, 255), 36.0f, 1.9f).SetMode(RenderUtils::GlowMode::NeonTube).SetCoreStrength(1.1f).SetInnerGlow(true).SetRenderMode(RenderUtils::GlowRenderMode::Shader)).With<RenderUtils::ShaderComponent>(RenderUtils::ShaderComponent().SetPixelSource(RenderUtils::ShaderSourceSpec().SetMode(RenderUtils::ShaderSourceMode::File).SetSource("assets/shaders/glow_default.hlsl").SetTarget("ps_5_0"))).With<RenderUtils::TextComponent>(RenderUtils::TextComponent("Neon", IM_COL32(235, 245, 255, 255)).Align(RenderUtils::TextAlign::Center)))
-                                    .Child(RenderUtils::UIBuilder::Begin(g_registry).Create<RenderUtils::ContainerType::Panel>("GlowAmbientCard").With<RenderUtils::TransformComponent>(RenderUtils::TransformComponent().SetPosition(ImVec2(392, 70)).SetSize(ImVec2(170, 230))).With<RenderUtils::StyleComponent>(RenderUtils::StyleComponent().SetBackgroundColor(IM_COL32(47, 53, 63, 255)).SetRounding(10.0f)).With<RenderUtils::GlowComponent>(RenderUtils::GlowComponent(IM_COL32(198, 160, 255, 255), 42.0f, 1.35f).SetMode(RenderUtils::GlowMode::AmbientSoft).SetRenderMode(RenderUtils::GlowRenderMode::Shader)).With<RenderUtils::ShaderComponent>(RenderUtils::ShaderComponent().SetPixelSource(RenderUtils::ShaderSourceSpec().SetMode(RenderUtils::ShaderSourceMode::File).SetSource("assets/shaders/glow_default.hlsl").SetTarget("ps_5_0"))).With<RenderUtils::TextComponent>(RenderUtils::TextComponent("Ambient", IM_COL32(235, 245, 255, 255)).Align(RenderUtils::TextAlign::Center)))
+                                    .Child(RenderUtils::UIBuilder::Begin(g_registry).Create<RenderUtils::ContainerType::Panel>("GlowGaussianCard").With<RenderUtils::TransformComponent>(RenderUtils::TransformComponent().SetPosition(ImVec2(20, 70)).SetSize(ImVec2(170, 230))).With<RenderUtils::StyleComponent>(RenderUtils::StyleComponent().SetBackgroundColor(IM_COL32(48, 54, 64, 255)).SetRounding(10.0f)).With<RenderUtils::GlowComponent>(RenderUtils::GlowComponent(IM_COL32(102, 180, 255, 255), 34.0f, 1.6f).SetMode(RenderUtils::GlowMode::GaussianBloom).SetRenderMode(RenderUtils::GlowRenderMode::Shader).ParamBindFloat("u_time", "time", 0.0f)).With<RenderUtils::ShaderComponent>(RenderUtils::ShaderComponent().SetPixelSource(RenderUtils::ShaderSourceSpec().SetMode(RenderUtils::ShaderSourceMode::EmbeddedCpp).SetSource("glow.default").SetTarget("ps_5_0"))).With<RenderUtils::TextComponent>(RenderUtils::TextComponent("Gaussian", IM_COL32(235, 245, 255, 255)).Align(RenderUtils::TextAlign::Center)))
+                                    .Child(RenderUtils::UIBuilder::Begin(g_registry).Create<RenderUtils::ContainerType::Panel>("GlowNeonCard").With<RenderUtils::TransformComponent>(RenderUtils::TransformComponent().SetPosition(ImVec2(206, 70)).SetSize(ImVec2(170, 230))).With<RenderUtils::StyleComponent>(RenderUtils::StyleComponent().SetBackgroundColor(IM_COL32(45, 52, 61, 255)).SetRounding(10.0f)).With<RenderUtils::GlowComponent>(RenderUtils::GlowComponent(IM_COL32(88, 245, 225, 255), 36.0f, 1.9f).SetMode(RenderUtils::GlowMode::NeonTube).SetCoreStrength(1.1f).SetInnerGlow(true).SetRenderMode(RenderUtils::GlowRenderMode::Shader).ParamBindFloat("u_time", "time", 0.0f).ParamBindVec2("u_mouse", "mouse", ImVec2(0.0f, 0.0f))).With<RenderUtils::ShaderComponent>(RenderUtils::ShaderComponent().SetPixelSource(RenderUtils::ShaderSourceSpec().SetMode(RenderUtils::ShaderSourceMode::EmbeddedCpp).SetSource("glow.default").SetTarget("ps_5_0"))).With<RenderUtils::TextComponent>(RenderUtils::TextComponent("Neon", IM_COL32(235, 245, 255, 255)).Align(RenderUtils::TextAlign::Center)))
+                                    .Child(RenderUtils::UIBuilder::Begin(g_registry).Create<RenderUtils::ContainerType::Panel>("GlowAmbientCard").With<RenderUtils::TransformComponent>(RenderUtils::TransformComponent().SetPosition(ImVec2(392, 70)).SetSize(ImVec2(170, 230))).With<RenderUtils::StyleComponent>(RenderUtils::StyleComponent().SetBackgroundColor(IM_COL32(47, 53, 63, 255)).SetRounding(10.0f)).With<RenderUtils::GlowComponent>(RenderUtils::GlowComponent(IM_COL32(198, 160, 255, 255), 42.0f, 1.35f).SetMode(RenderUtils::GlowMode::AmbientSoft).SetRenderMode(RenderUtils::GlowRenderMode::Shader).ParamBindFloat("u_time", "time", 0.0f)).With<RenderUtils::ShaderComponent>(RenderUtils::ShaderComponent().SetPixelSource(RenderUtils::ShaderSourceSpec().SetMode(RenderUtils::ShaderSourceMode::EmbeddedCpp).SetSource("glow.default").SetTarget("ps_5_0"))).With<RenderUtils::TextComponent>(RenderUtils::TextComponent("Ambient", IM_COL32(235, 245, 255, 255)).Align(RenderUtils::TextAlign::Center)))
                                     .Child(RenderUtils::UIBuilder::Begin(g_registry)
                                         .Create<RenderUtils::ContainerType::Panel>("EffectsGlowQualityOptions")
                                         .With<RenderUtils::TransformComponent>(RenderUtils::TransformComponent().SetPosition(ImVec2(20, 312)).SetSize(ImVec2(542, 34)))
@@ -346,7 +334,17 @@ namespace MainRendering {
                                     .Create<RenderUtils::ContainerType::Panel>("EffectsCustomAnimCard")
                                     .With<RenderUtils::TransformComponent>(RenderUtils::TransformComponent().SetPosition(ImVec2(18, 396)).SetSize(ImVec2(1214, 180)))
                                     .With<RenderUtils::StyleComponent>(RenderUtils::StyleComponent().SetBackgroundColor(IM_COL32(39, 43, 52, 255)).SetRounding(8.0f).SetBorderColor(IM_COL32(71, 80, 96, 255)).SetBorderSize(1.0f))
-                                    .With<RenderUtils::ShaderComponent>(RenderUtils::ShaderComponent().SetPixelSource(RenderUtils::ShaderSourceSpec().SetMode(RenderUtils::ShaderSourceMode::File).SetSource("assets/shaders/glow_default.hlsl").SetTarget("ps_5_0")))
+                                    .With<RenderUtils::ShaderComponent>(
+                                        RenderUtils::ShaderComponent()
+                                            .SetPixelSource(
+                                                RenderUtils::ShaderSourceSpec()
+                                                    .SetMode(RenderUtils::ShaderSourceMode::EmbeddedCpp)
+                                                    .SetSource("glow.default")
+                                                    .SetTarget("ps_5_0"))
+                                            .ConfigureParameters(
+                                                RenderUtils::ShaderParamBuilder()
+                                                    .BindFloat("u_time", "time", 0.0f)
+                                                    .BindVec2("u_mouse", "mouse", ImVec2(0.0f, 0.0f))))
                                     .With<RenderUtils::TextComponent>(RenderUtils::TextComponent("Custom + Animation: click panel to pulse glow", IM_COL32(220, 230, 245, 255)))
                                     .With<RenderUtils::CustomComponent>(
                                         RenderUtils::CustomComponent()
@@ -362,7 +360,9 @@ namespace MainRendering {
                                                             .SetMode(RenderUtils::GlowMode::NeonTube)
                                                             .SetCoreStrength(0.65f)
                                                             .SetInnerGlow(true)
-                                                            .SetSamples(14));
+                                                            .SetSamples(14)
+                                                            .ParamBindFloat("u_time", "time", 0.0f)
+                                                            .ParamBindVec2("u_mouse", "mouse", ImVec2(0.0f, 0.0f)));
 
                                                     RenderUtils::AnimationBuilder(reg, e)
                                                         .Loop(true)
@@ -702,40 +702,11 @@ namespace MainRendering {
                 )
             .End();
         // ------------------------------------------------
+        };
 
+        callbacks.OnFrame = [&](const DX12Init::FramePacket& frame) {
+            ImGuiIO& io = frame.IO ? *frame.IO : ImGui::GetIO();
 
-        StartupConfig startupConfig;
-        StartupState startupState;
-
-        bool done = false;
-        while (!done) {
-            MSG msg;
-            while (::PeekMessage(&msg, nullptr, 0U, 0U, PM_REMOVE)) {
-                ::TranslateMessage(&msg);
-                ::DispatchMessage(&msg);
-                if (msg.message == WM_QUIT)
-                    done = true;
-            }
-            if (done) break;
-
-            // --- 1. Begin Frame & Open Command List ---
-            // We must open the command list BEFORE UIRenderer::Update because ImageLoaderSystem may record upload commands.
-            FrameContext* frameCtx = DX12Init::WaitForNextFrameResources();
-            UINT backBufferIdx = DX12Init::g_pSwapChain->GetCurrentBackBufferIndex();
-            frameCtx->CommandAllocator->Reset();
-            DX12Init::g_pd3dCommandList->Reset(frameCtx->CommandAllocator, nullptr);
-
-            // --- 2. ImGui Frame Setup ---
-            ImguiRender::NewFrame();
-
-            // Update Main Container Size
-            ImGuiIO& io = ImGui::GetIO();
-            RenderUtils::ShaderSystem::BeginImGuiPass(
-                DX12Init::g_pd3dCommandList,
-                DX12Init::g_mainRenderTargetDescriptor[backBufferIdx],
-                io.DisplaySize);
-            // Since we don't have the "mainContainer" variable easily accessible (it was local to builder),
-            // we should find it by name.
             auto mainEnt = RenderUtils::UIRenderer::FindEntityByName(g_registry, "MainContainer");
             if (g_registry.valid(mainEnt)) {
                 g_registry.patch<RenderUtils::TransformComponent>(mainEnt, [&io](auto& transform) {
@@ -743,63 +714,8 @@ namespace MainRendering {
                 });
             }
 
-            float deltaTime = 1.0f / 60.0f;
-            if (std::isfinite(io.Framerate) && io.Framerate > 1.0f) {
-                deltaTime = 1.0f / io.Framerate;
-            }
-            if (!std::isfinite(deltaTime) || deltaTime < 0.0f) {
-                deltaTime = 1.0f / 60.0f;
-            }
-            if (deltaTime > 0.25f) {
-                deltaTime = 0.25f;
-            }
-            bool ranMainUpdate = false;
-
-            if (!startupState.Initialized) {
-                startupState.Initialized = true;
-                startupState.Completed = (startupConfig.Mode == StartupMode::ImmediateUI);
-                startupState.TimedOut = false;
-                startupState.StartTimeSec = static_cast<float>(ImGui::GetTime());
-                startupState.ElapsedSec = 0.0f;
-                startupState.SummaryLine.clear();
-            }
-
-            if (startupConfig.Mode == StartupMode::BlockOnRequiredImages && !startupState.Completed) {
-                if (startupConfig.Priority == StartupPriority::ImagesFirst) {
-                    Components::ImageLoaderSystem::Update(g_registry);
-                    RenderUtils::UIRenderer::ResolveTransforms(g_registry);
-                    RenderUtils::UIRenderer::ResolveDepth(g_registry);
-                } else {
-                    RenderUtils::UIRenderer::Update(g_registry, deltaTime);
-                }
-                ranMainUpdate = true;
-
-                startupState.Progress = Components::ImageLoaderSystem::QueryProgress(g_registry);
-                startupState.ElapsedSec = static_cast<float>(ImGui::GetTime()) - startupState.StartTimeSec;
-
-                if (startupState.Progress.done) {
-                    startupState.Completed = true;
-                    startupState.SummaryLine =
-                        "Startup complete: " + std::to_string(startupState.Progress.readyRequired) + " ready, " +
-                        std::to_string(startupState.Progress.failedRequired) + " failed.";
-                } else {
-                    const float timeout = (std::max)(1.0f, startupConfig.TimeoutSeconds);
-                    if (startupState.ElapsedSec >= timeout) {
-                        startupState.Completed = true;
-                        startupState.TimedOut = true;
-                        startupState.SummaryLine =
-                            "Startup timeout after " + std::to_string(static_cast<int>(timeout)) + "s: " +
-                            std::to_string(startupState.Progress.readyRequired) + " ready, " +
-                            std::to_string(startupState.Progress.failedRequired) + " failed, " +
-                            std::to_string(startupState.Progress.loadingRequired) + " still loading.";
-                    }
-                }
-            }
-
-            if (!ranMainUpdate) {
-                RenderUtils::UIRenderer::Update(g_registry, deltaTime);
-                startupState.Progress = Components::ImageLoaderSystem::QueryProgress(g_registry);
-            }
+            const float deltaTime = frame.DeltaTime;
+            RenderUtils::StartupRuntime::Update(g_registry, deltaTime, startupConfig, startupState);
 
             auto findEntity = [](const char* name) -> entt::entity {
                 return RenderUtils::UIRenderer::FindEntityByName(g_registry, name);
@@ -816,17 +732,17 @@ namespace MainRendering {
                     options.SelectedIndex = selected;
                 }
 
-                const StartupMode requestedMode = (selected == 1)
-                    ? StartupMode::ImmediateUI
-                    : StartupMode::BlockOnRequiredImages;
-                if (requestedMode != startupConfig.Mode) {
-                    startupConfig.Mode = requestedMode;
-                    if (startupConfig.Mode == StartupMode::ImmediateUI) {
+                const RenderUtils::StartupRuntime::Mode requestedMode = (selected == 1)
+                    ? RenderUtils::StartupRuntime::Mode::ImmediateUI
+                    : RenderUtils::StartupRuntime::Mode::BlockOnRequiredImages;
+                if (requestedMode != startupConfig.ModeValue) {
+                    startupConfig.ModeValue = requestedMode;
+                    if (startupConfig.ModeValue == RenderUtils::StartupRuntime::Mode::ImmediateUI) {
                         startupState.Completed = true;
                         startupState.TimedOut = false;
                         startupState.SummaryLine = "Startup mode switched to Immediate UI.";
                     } else {
-                        startupState = StartupState{};
+                        RenderUtils::StartupRuntime::Reset(startupState);
                     }
                 }
             }
@@ -840,7 +756,7 @@ namespace MainRendering {
                 if (selected != options.SelectedIndex) {
                     options.SelectedIndex = selected;
                 }
-                startupConfig.Priority = static_cast<StartupPriority>(selected);
+                startupConfig.PriorityValue = static_cast<RenderUtils::StartupRuntime::Priority>(selected);
             }
 
             entt::entity timeoutEnt = findEntity("SysTimeoutSlider");
@@ -1009,7 +925,7 @@ namespace MainRendering {
 
             if (g_RequestStartupRestart) {
                 Components::ImageLoaderSystem::RequestRestart(g_registry, false);
-                startupState = StartupState{};
+                RenderUtils::StartupRuntime::Reset(startupState);
                 g_RequestStartupRestart = false;
             }
 
@@ -1051,12 +967,12 @@ namespace MainRendering {
                 text.Color = IM_COL32(12, 20, 30, 255);
             }
 
-            const char* modeLabel = startupConfig.Mode == StartupMode::ImmediateUI
+            const char* modeLabel = startupConfig.ModeValue == RenderUtils::StartupRuntime::Mode::ImmediateUI
                 ? "Immediate UI"
                 : "Block On Required Images";
-            const char* priorityLabel = startupConfig.Priority == StartupPriority::ImagesFirst
+            const char* priorityLabel = startupConfig.PriorityValue == RenderUtils::StartupRuntime::Priority::ImagesFirst
                 ? "Images First"
-                : (startupConfig.Priority == StartupPriority::SystemsFirst ? "Systems First" : "Balanced");
+                : (startupConfig.PriorityValue == RenderUtils::StartupRuntime::Priority::SystemsFirst ? "Systems First" : "Balanced");
 
             const int fpsInt = static_cast<int>(io.Framerate + 0.5f);
             const std::string statusText =
@@ -1164,7 +1080,7 @@ namespace MainRendering {
                 RenderUtils::UIRenderer::RenderInspector(g_registry);
             }
 
-            if (startupConfig.Mode == StartupMode::BlockOnRequiredImages && !startupState.Completed) {
+            if (startupConfig.ModeValue == RenderUtils::StartupRuntime::Mode::BlockOnRequiredImages && !startupState.Completed) {
                 const ImVec2 center = ImVec2(io.DisplaySize.x * 0.5f, io.DisplaySize.y * 0.5f);
                 ImGui::SetNextWindowPos(center, ImGuiCond_Always, ImVec2(0.5f, 0.5f));
                 ImGui::SetNextWindowSize(ImVec2(500, 170), ImGuiCond_Always);
@@ -1184,51 +1100,15 @@ namespace MainRendering {
                 ImGui::End();
             }
 
-            // --- 3. Finalize & Draw ---
-            ImGui::Render();
+        };
 
-            D3D12_RESOURCE_BARRIER barrier = {};
-            barrier.Type                   = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-            barrier.Flags                  = D3D12_RESOURCE_BARRIER_FLAG_NONE;
-            barrier.Transition.pResource   = DX12Init::g_mainRenderTargetResource[backBufferIdx];
-            barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-            barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_PRESENT;
-            barrier.Transition.StateAfter  = D3D12_RESOURCE_STATE_RENDER_TARGET;
+        callbacks.OnShutdown = [&]() {
+            RenderUtils::ShaderSystem::UnregisterUniformResolver("app.mouse_norm");
+            RenderUtils::ShaderSystem::UnregisterUniformResolver("app.sin_time");
+            RenderUtils::UIRenderer::Shutdown(g_registry);
+        };
 
-            DX12Init::g_pd3dCommandList->ResourceBarrier(1, &barrier);
-
-            const float clear_color_with_alpha[4] = { 0.45f, 0.55f, 0.60f, 1.00f };
-            DX12Init::g_pd3dCommandList->ClearRenderTargetView(DX12Init::g_mainRenderTargetDescriptor[backBufferIdx], clear_color_with_alpha, 0, nullptr);
-            DX12Init::g_pd3dCommandList->OMSetRenderTargets(1, &DX12Init::g_mainRenderTargetDescriptor[backBufferIdx], FALSE, nullptr);
-            DX12Init::g_pd3dCommandList->SetDescriptorHeaps(1, &DX12Init::g_pd3dSrvDescHeap);
-
-            ImguiRender::RenderDrawData(DX12Init::g_pd3dCommandList);
-            RenderUtils::ShaderSystem::EndImGuiPass();
-
-            barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
-            barrier.Transition.StateAfter  = D3D12_RESOURCE_STATE_PRESENT;
-            DX12Init::g_pd3dCommandList->ResourceBarrier(1, &barrier);
-            DX12Init::g_pd3dCommandList->Close();
-
-            DX12Init::g_pd3dCommandQueue->ExecuteCommandLists(1, (ID3D12CommandList* const*)&DX12Init::g_pd3dCommandList);
-
-            DX12Init::g_pSwapChain->Present(1, 0); // Present with vsync
-
-            UINT64 fenceValue = DX12Init::g_fenceLastSignaledValue + 1;
-            DX12Init::g_pd3dCommandQueue->Signal(DX12Init::g_fence, fenceValue);
-            DX12Init::g_fenceLastSignaledValue = fenceValue;
-            frameCtx->FenceValue = fenceValue;
-        }
-
-        DX12Init::WaitForLastSubmittedFrame();
-        Components::ImageLoaderSystem::Shutdown(g_registry);
-        RenderUtils::ShaderSystem::Shutdown();
-        ImguiRender::Cleanup();
-        DX12Init::CleanupDeviceD3D();
-        DestroyWindow(hWnd);
-        UnregisterClass(wc.lpszClassName, wc.hInstance);
-
-        return 0;
+        return DX12Init::RunApp(hInstance, runConfig, callbacks);
     }
 }
 

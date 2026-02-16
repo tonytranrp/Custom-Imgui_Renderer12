@@ -11,6 +11,8 @@ float4 main(VSOut i) : SV_Target
 {
     float2 center = 0.5 * (gRectMinMax.xy + gRectMinMax.zw);
     float2 halfSize = max(float2(1.0, 1.0), 0.5 * (gRectMinMax.zw - gRectMinMax.xy));
+    float rounding = max(0.0, gParams1.w);
+    rounding = min(rounding, max(0.0, min(halfSize.x, halfSize.y) - 0.01));
 
     float radius = max(1.0, gParams0.x);
     float intensity = max(0.0, gParams0.y);
@@ -20,24 +22,26 @@ float4 main(VSOut i) : SV_Target
     float outerOnly = gParams1.y;
     float innerGlow = gParams1.z;
 
-    float dist = sdRoundRect(i.PixelPos - center, halfSize, 10.0);
+    float dist = sdRoundRect(i.PixelPos - center, halfSize, rounding);
     float dOuter = max(dist, 0.0);
+    float outerMask = step(0.0, dist);
 
     float sigma = max(1.0, radius * (0.45 / falloff));
-    float glow = exp(-(dOuter * dOuter) / (2.0 * sigma * sigma));
+    float glow = exp(-(dOuter * dOuter) / (2.0 * sigma * sigma)) * outerMask;
 
-    float edge = exp(-(abs(dist) * abs(dist)) / (2.0 * max(1.0, radius * 0.22) * max(1.0, radius * 0.22)));
+    float edgeSigma = max(1.0, radius * 0.22);
+    float edge = exp(-(abs(dist) * abs(dist)) / (2.0 * edgeSigma * edgeSigma));
     glow += edge * coreStrength;
-
-    if (outerOnly > 0.5 && dist < 0.0)
-    {
-        glow *= 0.2;
-    }
 
     if (innerGlow > 0.5)
     {
         float inner = exp(-(max(-dist, 0.0) * max(-dist, 0.0)) / (2.0 * max(1.0, radius * 0.3) * max(1.0, radius * 0.3)));
         glow += inner * 0.35;
+    }
+
+    if (outerOnly > 0.5)
+    {
+        glow *= outerMask;
     }
 
     float alpha = saturate(glow * intensity) * gColor.a * saturate(gParams2.w);

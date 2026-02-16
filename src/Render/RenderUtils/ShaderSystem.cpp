@@ -18,6 +18,8 @@
 #include <d3dcompiler.h>
 #include <wrl/client.h>
 
+#include <battery/embed.hpp>
+
 #include "Components/GlowComponent.hpp"
 #include "Components/ShaderComponent.hpp"
 #include "Components/ShadowComponent.hpp"
@@ -55,6 +57,7 @@ namespace RenderUtils::ShaderSystem {
             int ZOrder = 0;
             uint64_t EntityId = 0;
             uint64_t ProgramHandle = 0;
+            bool UseClipRect = true;
             ShaderGlobals Globals;
             std::vector<uint8_t> UserBytes;
         };
@@ -95,12 +98,14 @@ namespace RenderUtils::ShaderSystem {
         std::vector<DeferredRelease> s_DeferredReleases;
         uint64_t s_NextProgramHandle = 1;
         constexpr size_t kMaxQueuedDrawsPerFrame = 4096u;
-        constexpr const char* kSharedHeaderPath = "assets/shaders/ui_shader_shared.hlsli";
-        constexpr const char* kDefaultVertexPath = "assets/shaders/ui_default_vs.hlsl";
-        constexpr const char* kDefaultGlowPath = "assets/shaders/glow_default.hlsl";
-        constexpr const char* kDefaultShadowPath = "assets/shaders/shadow_default.hlsl";
-        constexpr const char* kInlineModeDisabledError = "Inline mode disabled by file-only policy.";
+        constexpr const char* kInlineModeDisabledError = "Inline mode disabled by shader source policy.";
+        constexpr const char* kDefaultSharedKey = "shader.shared";
+        constexpr const char* kDefaultVertexKey = "shader.default.vs";
+        constexpr const char* kDefaultGlowKey = "glow.default";
+        constexpr const char* kDefaultShadowKey = "shadow.default";
         std::unordered_map<std::string, std::string> s_SourceAliases;
+        std::unordered_map<std::string, EmbeddedShaderProvider> s_EmbeddedSourceProviders;
+        std::unordered_map<std::string, ShaderUniformResolver> s_UniformResolvers;
 
         bool ReadTextFile(const std::string& path, std::string& outText) {
             std::ifstream file(path, std::ios::in | std::ios::binary);
@@ -121,6 +126,38 @@ namespace RenderUtils::ShaderSystem {
             case ShaderSourceMode::Inline: return "Inline";
             }
             return "Unknown";
+        }
+
+        std::string ToString(ShaderParamType type) {
+            switch (type) {
+            case ShaderParamType::Float: return "Float";
+            case ShaderParamType::Int: return "Int";
+            case ShaderParamType::Vec2: return "Vec2";
+            case ShaderParamType::Vec3: return "Vec3";
+            case ShaderParamType::Vec4: return "Vec4";
+            case ShaderParamType::Color: return "Color";
+            case ShaderParamType::Bool: return "Bool";
+            }
+            return "Unknown";
+        }
+
+        std::string SanitizeParamName(const std::string& name) {
+            if (name.empty()) {
+                return "Param";
+            }
+            std::string out = name;
+            for (size_t i = 0; i < out.size(); ++i) {
+                const unsigned char ch = static_cast<unsigned char>(out[i]);
+                const bool alphaNum = (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9');
+                if (!(alphaNum || ch == '_')) {
+                    out[i] = '_';
+                }
+            }
+            const unsigned char first = static_cast<unsigned char>(out[0]);
+            if (!((first >= 'a' && first <= 'z') || (first >= 'A' && first <= 'Z') || first == '_')) {
+                out.insert(out.begin(), '_');
+            }
+            return out;
         }
 
         bool LooksLikeFilePath(const std::string& value) {
@@ -144,12 +181,174 @@ namespace RenderUtils::ShaderSystem {
             return ext == ".hlsl" || ext == ".hlsli";
         }
 
+        namespace EmbeddedSourceRegistry {
+            bool ProvideDefaultShared(std::string& outText) {
+                outText = b::embed<"assets/shaders/ui_shader_shared.hlsli">().str();
+                return !outText.empty();
+            }
+
+            bool ProvideDefaultVertex(std::string& outText) {
+                outText = b::embed<"assets/shaders/ui_default_vs.hlsl">().str();
+                return !outText.empty();
+            }
+
+            bool ProvideDefaultGlow(std::string& outText) {
+                outText = b::embed<"assets/shaders/glow_default.hlsl">().str();
+                return !outText.empty();
+            }
+
+            bool ProvideDefaultShadow(std::string& outText) {
+                outText = b::embed<"assets/shaders/shadow_default.hlsl">().str();
+                return !outText.empty();
+            }
+
+            void SeedDefaults() {
+                s_EmbeddedSourceProviders.clear();
+                s_EmbeddedSourceProviders[kDefaultSharedKey] = &ProvideDefaultShared;
+                s_EmbeddedSourceProviders[kDefaultVertexKey] = &ProvideDefaultVertex;
+                s_EmbeddedSourceProviders[kDefaultGlowKey] = &ProvideDefaultGlow;
+                s_EmbeddedSourceProviders[kDefaultShadowKey] = &ProvideDefaultShadow;
+            }
+
+            bool TryResolveText(const std::string& key, std::string& outText, std::string& outError) {
+                outText.clear();
+                outError.clear();
+                if (key.empty()) {
+                    outError = "Embedded source key is empty.";
+                    return false;
+                }
+
+                const auto it = s_EmbeddedSourceProviders.find(key);
+                if (it == s_EmbeddedSourceProviders.end() || it->second == nullptr) {
+                    outError = "Embedded source key not found: " + key;
+                    return false;
+                }
+
+                if (!it->second(outText) || outText.empty()) {
+                    outError = "Embedded source provider returned empty content for key: " + key;
+                    outText.clear();
+                    return false;
+                }
+                return true;
+            }
+        } // namespace EmbeddedSourceRegistry
+
+        namespace UniformResolverRegistry {
+            void SetTypeMismatch(const std::string& key, ShaderParamType expectedType, const std::string& required, std::string& outError) {
+                outError = "Uniform '" + key + "' expects " + required + " but parameter type is " + ToString(expectedType) + ".";
+            }
+
+            bool ResolveTime(const ShaderAutoUniformContext& context, ShaderParamType expectedType, ShaderParamValue& outValue, std::string& outError) {
+                if (expectedType != ShaderParamType::Float) {
+                    SetTypeMismatch("time", expectedType, "Float", outError);
+                    return false;
+                }
+                outValue = context.TimeSeconds;
+                return true;
+            }
+
+            bool ResolveDelta(const ShaderAutoUniformContext& context, ShaderParamType expectedType, ShaderParamValue& outValue, std::string& outError) {
+                if (expectedType != ShaderParamType::Float) {
+                    SetTypeMismatch("delta", expectedType, "Float", outError);
+                    return false;
+                }
+                outValue = context.DeltaSeconds;
+                return true;
+            }
+
+            bool ResolveMouse(const ShaderAutoUniformContext& context, ShaderParamType expectedType, ShaderParamValue& outValue, std::string& outError) {
+                if (expectedType == ShaderParamType::Vec2) {
+                    outValue = context.MousePos;
+                    return true;
+                }
+                if (expectedType == ShaderParamType::Vec4) {
+                    outValue = ImVec4(context.MousePos.x, context.MousePos.y, 0.0f, 0.0f);
+                    return true;
+                }
+                SetTypeMismatch("mouse", expectedType, "Vec2 or Vec4", outError);
+                return false;
+            }
+
+            bool ResolveDisplaySize(const ShaderAutoUniformContext& context, ShaderParamType expectedType, ShaderParamValue& outValue, std::string& outError) {
+                if (expectedType == ShaderParamType::Vec2) {
+                    outValue = context.DisplaySize;
+                    return true;
+                }
+                if (expectedType == ShaderParamType::Vec4) {
+                    outValue = ImVec4(context.DisplaySize.x, context.DisplaySize.y, 0.0f, 0.0f);
+                    return true;
+                }
+                SetTypeMismatch("display_size", expectedType, "Vec2 or Vec4", outError);
+                return false;
+            }
+
+            bool ResolveEntityMin(const ShaderAutoUniformContext& context, ShaderParamType expectedType, ShaderParamValue& outValue, std::string& outError) {
+                if (expectedType == ShaderParamType::Vec2) {
+                    outValue = context.EntityMin;
+                    return true;
+                }
+                if (expectedType == ShaderParamType::Vec4) {
+                    outValue = ImVec4(context.EntityMin.x, context.EntityMin.y, 0.0f, 0.0f);
+                    return true;
+                }
+                SetTypeMismatch("entity_min", expectedType, "Vec2 or Vec4", outError);
+                return false;
+            }
+
+            bool ResolveEntityMax(const ShaderAutoUniformContext& context, ShaderParamType expectedType, ShaderParamValue& outValue, std::string& outError) {
+                if (expectedType == ShaderParamType::Vec2) {
+                    outValue = context.EntityMax;
+                    return true;
+                }
+                if (expectedType == ShaderParamType::Vec4) {
+                    outValue = ImVec4(context.EntityMax.x, context.EntityMax.y, 0.0f, 0.0f);
+                    return true;
+                }
+                SetTypeMismatch("entity_max", expectedType, "Vec2 or Vec4", outError);
+                return false;
+            }
+
+            bool ResolveEntitySize(const ShaderAutoUniformContext& context, ShaderParamType expectedType, ShaderParamValue& outValue, std::string& outError) {
+                if (expectedType == ShaderParamType::Vec2) {
+                    outValue = context.EntitySize;
+                    return true;
+                }
+                if (expectedType == ShaderParamType::Vec4) {
+                    outValue = ImVec4(context.EntitySize.x, context.EntitySize.y, 0.0f, 0.0f);
+                    return true;
+                }
+                SetTypeMismatch("entity_size", expectedType, "Vec2 or Vec4", outError);
+                return false;
+            }
+
+            bool ResolveEntityRect(const ShaderAutoUniformContext& context, ShaderParamType expectedType, ShaderParamValue& outValue, std::string& outError) {
+                if (expectedType != ShaderParamType::Vec4) {
+                    SetTypeMismatch("entity_rect", expectedType, "Vec4", outError);
+                    return false;
+                }
+                outValue = context.EntityRect;
+                return true;
+            }
+
+            void SeedDefaults() {
+                s_UniformResolvers.clear();
+                s_UniformResolvers["time"] = &ResolveTime;
+                s_UniformResolvers["delta"] = &ResolveDelta;
+                s_UniformResolvers["mouse"] = &ResolveMouse;
+                s_UniformResolvers["display_size"] = &ResolveDisplaySize;
+                s_UniformResolvers["entity_min"] = &ResolveEntityMin;
+                s_UniformResolvers["entity_max"] = &ResolveEntityMax;
+                s_UniformResolvers["entity_size"] = &ResolveEntitySize;
+                s_UniformResolvers["entity_rect"] = &ResolveEntityRect;
+            }
+        } // namespace UniformResolverRegistry
+
         namespace SourceAliasRegistry {
             void SeedDefaults() {
-                s_SourceAliases["shader.shared"] = kSharedHeaderPath;
-                s_SourceAliases["shader.default.vs"] = kDefaultVertexPath;
-                s_SourceAliases["glow.default"] = kDefaultGlowPath;
-                s_SourceAliases["shadow.default"] = kDefaultShadowPath;
+                s_SourceAliases[kDefaultSharedKey] = "assets/shaders/ui_shader_shared.hlsli";
+                s_SourceAliases[kDefaultVertexKey] = "assets/shaders/ui_default_vs.hlsl";
+                s_SourceAliases[kDefaultGlowKey] = "assets/shaders/glow_default.hlsl";
+                s_SourceAliases[kDefaultShadowKey] = "assets/shaders/shadow_default.hlsl";
             }
 
             bool TryResolve(const std::string& key, std::string& outPath, std::string& outError) {
@@ -188,7 +387,7 @@ namespace RenderUtils::ShaderSystem {
                 case ShaderSourceMode::EmbeddedCpp:
                 case ShaderSourceMode::EmbeddedRust:
                     if (!SourceAliasRegistry::TryResolve(source.KeyOrPathOrInline, outPath, outError)) {
-                        outError = ToString(source.Mode) + ": " + outError;
+                        outError = ToString(source.Mode) + " (file-alias fallback): " + outError;
                         return false;
                     }
                     return true;
@@ -202,22 +401,51 @@ namespace RenderUtils::ShaderSystem {
 
             bool ResolveText(const ShaderSourceSpec& source, std::string& outText, std::string& outError) {
                 outText.clear();
-                std::string path;
-                if (!ResolvePath(source, path, outError)) {
+                switch (source.Mode) {
+                case ShaderSourceMode::File: {
+                    if (source.KeyOrPathOrInline.empty()) {
+                        outError = "File mode source path is empty.";
+                        return false;
+                    }
+                    if (!ReadTextFile(source.KeyOrPathOrInline, outText)) {
+                        outError = "Failed to read shader file: " + source.KeyOrPathOrInline;
+                        return false;
+                    }
+                    return true;
+                }
+                case ShaderSourceMode::EmbeddedCpp:
+                case ShaderSourceMode::EmbeddedRust: {
+                    std::string embeddedError;
+                    if (EmbeddedSourceRegistry::TryResolveText(source.KeyOrPathOrInline, outText, embeddedError)) {
+                        return true;
+                    }
+
+                    std::string aliasPath;
+                    std::string aliasError;
+                    if (SourceAliasRegistry::TryResolve(source.KeyOrPathOrInline, aliasPath, aliasError)) {
+                        if (!ReadTextFile(aliasPath, outText)) {
+                            outError = "Embedded key fallback file read failed: " + aliasPath;
+                            return false;
+                        }
+                        return true;
+                    }
+
+                    outError = ToString(source.Mode) + ": " + embeddedError + " | " + aliasError;
                     return false;
                 }
-                if (!ReadTextFile(path, outText)) {
-                    outError = "Failed to read shader file: " + path;
+                case ShaderSourceMode::Inline:
+                    outError = kInlineModeDisabledError;
                     return false;
                 }
-                return true;
+                outError = "Unsupported ShaderSourceMode.";
+                return false;
             }
 
             bool ResolveSharedPrelude(std::string& outText, std::string& outError) {
                 outText.clear();
                 ShaderSourceSpec shared;
                 shared.Mode = ShaderSourceMode::EmbeddedCpp;
-                shared.KeyOrPathOrInline = "shader.shared";
+                shared.KeyOrPathOrInline = kDefaultSharedKey;
                 shared.EntryPoint = "main";
                 shared.TargetProfile = "ps_5_0";
                 return ResolveText(shared, outText, outError);
@@ -848,7 +1076,9 @@ namespace RenderUtils::ShaderSystem {
                 clipRect.z = (clipRect.z - clipOff.x) * clipScale.x;
                 clipRect.w = (clipRect.w - clipOff.y) * clipScale.y;
             }
-            if (!RenderSingleDraw(*draw, s_ImGuiPass.CommandList, s_ImGuiPass.RTV, s_ImGuiPass.DisplaySize, &clipRect)) {
+
+            const ImVec4* effectiveClip = draw->UseClipRect ? &clipRect : nullptr;
+            if (!RenderSingleDraw(*draw, s_ImGuiPass.CommandList, s_ImGuiPass.RTV, s_ImGuiPass.DisplaySize, effectiveClip)) {
                 ++s_ImGuiPass.CallbackRuntimeFailureCount;
             }
         }
@@ -912,11 +1142,18 @@ namespace RenderUtils::ShaderSystem {
             }
             ShaderSourceSpec sharedPreludeSource;
             sharedPreludeSource.Mode = ShaderSourceMode::EmbeddedCpp;
-            sharedPreludeSource.KeyOrPathOrInline = "shader.shared";
+            sharedPreludeSource.KeyOrPathOrInline = kDefaultSharedKey;
             checkFile(sharedPreludeSource);
         }
 
-        bool ValidateSourceSpec(ShaderSourceSpec& source, bool isVertex, bool forGlow, bool forShadow) {
+        bool NormalizeAndValidateSourceSpec(
+            const ShaderSourceSpec& input,
+            bool isVertex,
+            ShaderSourceSpec& source,
+            std::string& outError) {
+            source = input;
+            outError.clear();
+
             if (source.EntryPoint.empty()) {
                 source.EntryPoint = "main";
             }
@@ -924,36 +1161,27 @@ namespace RenderUtils::ShaderSystem {
                 source.TargetProfile = isVertex ? "vs_5_0" : "ps_5_0";
             }
 
+            if (source.Mode == ShaderSourceMode::Inline) {
+                outError = kInlineModeDisabledError;
+                return false;
+            }
+
             if (!source.KeyOrPathOrInline.empty()) {
                 return true;
             }
 
             if (source.Mode == ShaderSourceMode::File) {
-                if (isVertex) {
-                    source.KeyOrPathOrInline = kDefaultVertexPath;
-                } else if (forGlow) {
-                    source.KeyOrPathOrInline = kDefaultGlowPath;
-                } else if (forShadow) {
-                    source.KeyOrPathOrInline = kDefaultShadowPath;
-                } else {
-                    source.KeyOrPathOrInline = kDefaultGlowPath;
-                }
-                return true;
+                outError = "File mode source path is empty.";
+                return false;
             }
 
             if (source.Mode == ShaderSourceMode::EmbeddedCpp || source.Mode == ShaderSourceMode::EmbeddedRust) {
-                if (isVertex) {
-                    source.KeyOrPathOrInline = "shader.default.vs";
-                } else if (forGlow) {
-                    source.KeyOrPathOrInline = "glow.default";
-                } else if (forShadow) {
-                    source.KeyOrPathOrInline = "shadow.default";
-                } else {
-                    source.KeyOrPathOrInline = "glow.default";
-                }
+                outError = ToString(source.Mode) + " source key is empty.";
+                return false;
             }
 
-            return true;
+            outError = "Unsupported ShaderSourceMode.";
+            return false;
         }
 
         bool PrepareShaderSources(
@@ -972,8 +1200,20 @@ namespace RenderUtils::ShaderSystem {
             outKey.clear();
             outError.clear();
 
-            ValidateSourceSpec(vsSource, true, forGlow, forShadow);
-            ValidateSourceSpec(psSource, false, forGlow, forShadow);
+            ShaderSourceSpec normalizedVs;
+            ShaderSourceSpec normalizedPs;
+            std::string normalizeError;
+            if (!NormalizeAndValidateSourceSpec(vsSource, true, normalizedVs, normalizeError)) {
+                outError = "Vertex source validation failed: " + normalizeError;
+                return false;
+            }
+            if (!NormalizeAndValidateSourceSpec(psSource, false, normalizedPs, normalizeError)) {
+                outError = "Pixel source validation failed: " + normalizeError;
+                return false;
+            }
+
+            vsSource = normalizedVs;
+            psSource = normalizedPs;
 
             std::string resolveError;
             if (!SourceResolver::ResolveText(vsSource, outVsText, resolveError) || outVsText.empty()) {
@@ -1005,9 +1245,9 @@ namespace RenderUtils::ShaderSystem {
                 outPsText = userDecl + "\n" + outPsText;
             }
 
-            const std::string userParamSig = BuildUserParamSignature(params);
+            const std::string userParamSig = CompileHelpers::BuildUserParamSignature(params);
             const BlendMode blend = forGlow ? BlendMode::Additive : BlendMode::Alpha;
-            outKey = BuildShaderCacheKey(
+            outKey = CompileHelpers::BuildShaderCacheKey(
                 blend,
                 stageMode,
                 vsSource,
@@ -1098,38 +1338,58 @@ namespace RenderUtils::ShaderSystem {
             return true;
         }
 
-        ShaderSourceSpec BuildDefaultVertexSource() {
+        ShaderSourceSpec BuildCoreVertexSource() {
             ShaderSourceSpec source;
-            source.Mode = ShaderSourceMode::File;
-            source.KeyOrPathOrInline = kDefaultVertexPath;
+            source.Mode = ShaderSourceMode::EmbeddedCpp;
+            source.KeyOrPathOrInline = kDefaultVertexKey;
             source.EntryPoint = "main";
             source.TargetProfile = "vs_5_0";
             return source;
         }
 
-        ShaderSourceSpec BuildDefaultPixelSource(bool forGlow, bool forShadow, const std::string& keyOverride) {
+        ShaderSourceSpec BuildEffectPixelSource(bool forGlow, bool forShadow, const std::string& keyOrPath) {
+            (void)forGlow;
             (void)forShadow;
             ShaderSourceSpec source;
-            source.Mode = ShaderSourceMode::File;
-            source.KeyOrPathOrInline = forGlow ? kDefaultGlowPath : kDefaultShadowPath;
-            if (!keyOverride.empty()) {
-                if (keyOverride == "glow.default") {
-                    source.Mode = ShaderSourceMode::File;
-                    source.KeyOrPathOrInline = kDefaultGlowPath;
-                } else if (keyOverride == "shadow.default") {
-                    source.Mode = ShaderSourceMode::File;
-                    source.KeyOrPathOrInline = kDefaultShadowPath;
-                } else if (LooksLikeFilePath(keyOverride)) {
-                    source.Mode = ShaderSourceMode::File;
-                    source.KeyOrPathOrInline = keyOverride;
-                } else {
-                    source.Mode = ShaderSourceMode::EmbeddedCpp;
-                    source.KeyOrPathOrInline = keyOverride;
-                }
-            }
+            source.Mode = LooksLikeFilePath(keyOrPath) ? ShaderSourceMode::File : ShaderSourceMode::EmbeddedCpp;
+            source.KeyOrPathOrInline = keyOrPath;
             source.EntryPoint = "main";
             source.TargetProfile = "ps_5_0";
             return source;
+        }
+
+        std::vector<ShaderParameter> MergeEffectParameters(
+            const std::vector<ShaderParameter>& base,
+            const std::vector<ShaderParameter>* overlay) {
+            std::vector<ShaderParameter> merged;
+            merged.reserve(base.size() + (overlay ? overlay->size() : 0));
+
+            for (const auto& param : base) {
+                ShaderParameter normalized = param;
+                normalized.Name = SanitizeParamName(param.Name);
+                merged.push_back(std::move(normalized));
+            }
+
+            if (!overlay) {
+                return merged;
+            }
+
+            for (const auto& param : *overlay) {
+                ShaderParameter normalized = param;
+                normalized.Name = SanitizeParamName(param.Name);
+                bool replaced = false;
+                for (auto& existing : merged) {
+                    if (existing.Name == normalized.Name) {
+                        existing = normalized;
+                        replaced = true;
+                        break;
+                    }
+                }
+                if (!replaced) {
+                    merged.push_back(std::move(normalized));
+                }
+            }
+            return merged;
         }
         bool BuildQueueEntry(
             entt::registry& registry,
@@ -1173,35 +1433,56 @@ namespace RenderUtils::ShaderSystem {
 
             ShaderBackendMode backend = ShaderBackendMode::AutoPreferDXC;
             ShaderCompilePolicy policy = ShaderCompilePolicy::OnDemandCache;
-            ShaderSourceSpec vertexSource = BuildDefaultVertexSource();
-            ShaderSourceSpec pixelSource = BuildDefaultPixelSource(
-                forGlow,
-                forShadow,
-                forGlow && glow ? glow->ShaderKey : (forShadow && shadow ? shadow->ShaderKey : std::string{}));
-            std::vector<ShaderParameter> params;
+            ShaderSourceSpec vertexSource = BuildCoreVertexSource();
+            const std::string effectSourceKeyOrPath =
+                forGlow && glow ? glow->ShaderKey : (forShadow && shadow ? shadow->ShaderKey : std::string{});
+            ShaderSourceSpec pixelSource = BuildEffectPixelSource(forGlow, forShadow, effectSourceKeyOrPath);
+            bool hasPixelSource = !pixelSource.KeyOrPathOrInline.empty();
+            std::vector<ShaderParameter> baseParams;
             ShaderStageMode stageMode = ShaderStageMode::PixelOnly;
 
             if (shader && shader->Enabled) {
                 backend = shader->Backend;
                 policy = shader->CompilePolicy;
                 stageMode = shader->StageMode;
-                params = shader->Parameters;
+                baseParams = shader->Parameters;
 
-                if (shader->PixelSource.Mode != ShaderSourceMode::Inline && shader->PixelSource.KeyOrPathOrInline.empty()) {
-                    shader->PixelSource = pixelSource;
+                if (!shader->PixelSource.KeyOrPathOrInline.empty() || shader->PixelSource.Mode == ShaderSourceMode::Inline) {
+                    pixelSource = shader->PixelSource;
+                    hasPixelSource = true;
                 }
-                if (shader->VertexSource.Mode != ShaderSourceMode::Inline && shader->VertexSource.KeyOrPathOrInline.empty()) {
-                    shader->VertexSource = BuildDefaultVertexSource();
+                if (stageMode == ShaderStageMode::VertexAndPixel) {
+                    if (shader->VertexSource.KeyOrPathOrInline.empty() && shader->VertexSource.Mode != ShaderSourceMode::Inline) {
+                        outError = "VertexAndPixel stage requires explicit vertex source.";
+                        CompileHelpers::MarkShaderFailure(shader, outError);
+                        return false;
+                    }
+                    vertexSource = shader->VertexSource;
+                } else {
+                    vertexSource = BuildCoreVertexSource();
                 }
+            }
 
-                pixelSource = shader->PixelSource;
-                vertexSource = (stageMode == ShaderStageMode::VertexAndPixel) ? shader->VertexSource : BuildDefaultVertexSource();
+            const std::vector<ShaderParameter>* effectParams = nullptr;
+            if (forGlow && glow) {
+                effectParams = &glow->ShaderParameters;
+            } else if (forShadow && shadow) {
+                effectParams = &shadow->ShaderParameters;
+            }
+            std::vector<ShaderParameter> params = MergeEffectParameters(baseParams, effectParams);
+
+            if (!hasPixelSource || pixelSource.KeyOrPathOrInline.empty()) {
+                outError = "Pixel source is required (set ShaderComponent pixel source or effect ShaderKey).";
+                if (shader) {
+                    CompileHelpers::MarkShaderFailure(shader, outError);
+                }
+                return false;
             }
 
             if (policy == ShaderCompilePolicy::ManualApply) {
                 if (!shader || !shader->CompileRequested) {
                     if (shader) {
-                        MarkShaderFailure(shader, "ManualApply selected: press Apply/Recompile.");
+                        CompileHelpers::MarkShaderFailure(shader, "ManualApply selected: press Apply/Recompile.");
                     }
                     outError = "ManualApply selected: compile not requested.";
                     return false;
@@ -1212,10 +1493,11 @@ namespace RenderUtils::ShaderSystem {
             ShaderBackendMode backendUsed = ShaderBackendMode::D3DCompileOnly;
             if (!AcquireProgram(vertexSource, pixelSource, params, stageMode, backend, forGlow, forShadow, programHandle, backendUsed, outError)) {
                 if (shader) {
-                    MarkShaderFailure(shader, outError);
+                    CompileHelpers::MarkShaderFailure(shader, outError);
                 }
                 return false;
             }
+            (void)backendUsed;
 
             if (shader) {
                 shader->IsCompiled = true;
@@ -1230,6 +1512,12 @@ namespace RenderUtils::ShaderSystem {
             outEntry.ZOrder = zOrder;
             outEntry.EntityId = static_cast<uint64_t>(entt::to_integral(entity));
             outEntry.ProgramHandle = programHandle;
+            outEntry.UseClipRect = true;
+            if (forGlow && glow) {
+                outEntry.UseClipRect = glow->ClipToParent;
+            } else if (forShadow && shadow) {
+                outEntry.UseClipRect = shadow->ClipToParent;
+            }
 
             ShaderGlobals globals{};
             globals.RectMinMax[0] = pMin.x;
@@ -1240,6 +1528,11 @@ namespace RenderUtils::ShaderSystem {
             globals.DrawMinMax[1] = pMin.y;
             globals.DrawMinMax[2] = pMax.x;
             globals.DrawMinMax[3] = pMax.y;
+
+            float shapeRounding = 0.0f;
+            if (const auto* style = registry.try_get<StyleComponent>(entity)) {
+                shapeRounding = (std::max)(0.0f, style->Rounding);
+            }
 
             if (forGlow && glow) {
                 globals.Color[0] = static_cast<float>((glow->Color >> 0) & 0xFF) / 255.0f;
@@ -1255,12 +1548,13 @@ namespace RenderUtils::ShaderSystem {
                 globals.Params1[0] = static_cast<float>(static_cast<int>(glow->Mode));
                 globals.Params1[1] = glow->OuterOnly ? 1.0f : 0.0f;
                 globals.Params1[2] = glow->InnerGlow ? 1.0f : 0.0f;
-                globals.Params1[3] = static_cast<float>(static_cast<int>(glow->QualityMode));
+                globals.Params1[3] = shapeRounding;
+                globals.Params3[0] = static_cast<float>(static_cast<int>(glow->QualityMode));
 
                 const float glowMargin =
                     (std::max)(
                         0.0f,
-                        glow->Radius * glow->RadiusScale * QualityModeScale(glow->QualityMode) * GlowModeScale(glow->Mode) + 4.0f);
+                        glow->Radius * glow->RadiusScale * DrawExecutionHelpers::QualityModeScale(glow->QualityMode) * DrawExecutionHelpers::GlowModeScale(glow->Mode) + 4.0f);
                 globals.DrawMinMax[0] -= glowMargin;
                 globals.DrawMinMax[1] -= glowMargin;
                 globals.DrawMinMax[2] += glowMargin;
@@ -1279,7 +1573,7 @@ namespace RenderUtils::ShaderSystem {
                 globals.Params1[0] = 0.0f;
                 globals.Params1[1] = shadow->Inset ? 1.0f : 0.0f;
                 globals.Params1[2] = 0.0f;
-                globals.Params1[3] = 0.0f;
+                globals.Params1[3] = shapeRounding;
 
                 globals.Params3[0] = shadow->Offset.x;
                 globals.Params3[1] = shadow->Offset.y;
@@ -1299,13 +1593,41 @@ namespace RenderUtils::ShaderSystem {
             globals.Params2[0] = 0.0f;
             globals.Params2[1] = 0.0f;
             globals.Params2[2] = static_cast<float>(ImGui::GetTime());
-            globals.Params2[3] = Clamp01(alpha);
+            globals.Params2[3] = DrawExecutionHelpers::Clamp01(alpha);
 
             outEntry.Globals = globals;
 
+            const ImGuiIO& io = ImGui::GetIO();
+            ShaderAutoUniformContext autoUniformContext;
+            autoUniformContext.TimeSeconds = static_cast<float>(ImGui::GetTime());
+            autoUniformContext.DeltaSeconds = std::isfinite(io.DeltaTime) ? io.DeltaTime : 0.0f;
+            autoUniformContext.MousePos = io.MousePos;
+            autoUniformContext.DisplaySize = io.DisplaySize;
+            autoUniformContext.EntityMin = pMin;
+            autoUniformContext.EntityMax = pMax;
+            autoUniformContext.EntitySize = ImVec2(pMax.x - pMin.x, pMax.y - pMin.y);
+            autoUniformContext.EntityRect = ImVec4(pMin.x, pMin.y, pMax.x, pMax.y);
+
             ShaderParamBuilder builder;
             builder.Set(params);
-            builder.BuildPackedCBuffer(outEntry.UserBytes);
+            std::string autoUniformError;
+            const ShaderParamBuilder::RegisteredUniformResolver registeredResolver =
+                [](const std::string& uniformKey,
+                    const ShaderAutoUniformContext& context,
+                    ShaderParamType expectedType,
+                    ShaderParamValue& outValue,
+                    std::string& outError) -> bool {
+                const auto resolverIt = s_UniformResolvers.find(uniformKey);
+                if (resolverIt == s_UniformResolvers.end() || !resolverIt->second) {
+                    outError = "Registered uniform resolver not found: " + uniformKey;
+                    return false;
+                }
+                return resolverIt->second(context, expectedType, outValue, outError);
+            };
+            builder.BuildPackedCBuffer(outEntry.UserBytes, &autoUniformContext, &registeredResolver, &autoUniformError);
+            if (!autoUniformError.empty() && shader && shader->LastError != autoUniformError) {
+                shader->LastError = autoUniformError;
+            }
             return true;
         }
     } // namespace
@@ -1315,6 +1637,8 @@ namespace RenderUtils::ShaderSystem {
         s_RootSignature.Reset();
         s_SourceAliases.clear();
         SourceAliasRegistry::SeedDefaults();
+        EmbeddedSourceRegistry::SeedDefaults();
+        UniformResolverRegistry::SeedDefaults();
         s_FileWriteTimes.clear();
         s_ProgramByKey.clear();
         s_Programs.clear();
@@ -1337,6 +1661,8 @@ namespace RenderUtils::ShaderSystem {
         s_Programs.clear();
         s_ProgramByKey.clear();
         s_SourceAliases.clear();
+        s_EmbeddedSourceProviders.clear();
+        s_UniformResolvers.clear();
         s_FileWriteTimes.clear();
         s_RootSignature.Reset();
         s_Device = nullptr;
@@ -1359,6 +1685,51 @@ namespace RenderUtils::ShaderSystem {
     void ResetDefaultSourceAliases() {
         s_SourceAliases.clear();
         SourceAliasRegistry::SeedDefaults();
+    }
+
+    void RegisterEmbeddedSource(const std::string& key, EmbeddedShaderProvider provider) {
+        if (key.empty() || provider == nullptr) {
+            return;
+        }
+        s_EmbeddedSourceProviders[key] = provider;
+    }
+
+    void UnregisterEmbeddedSource(const std::string& key) {
+        if (key.empty()) {
+            return;
+        }
+        s_EmbeddedSourceProviders.erase(key);
+    }
+
+    void ResetDefaultEmbeddedSources() {
+        EmbeddedSourceRegistry::SeedDefaults();
+    }
+
+    void RegisterUniformResolver(const std::string& key, ShaderUniformResolver resolver) {
+        if (key.empty() || !resolver) {
+            return;
+        }
+        s_UniformResolvers[key] = std::move(resolver);
+    }
+
+    void UnregisterUniformResolver(const std::string& key) {
+        if (key.empty()) {
+            return;
+        }
+        s_UniformResolvers.erase(key);
+    }
+
+    void ResetDefaultUniformResolvers() {
+        UniformResolverRegistry::SeedDefaults();
+    }
+
+    void QueryUniformResolverKeys(std::vector<std::string>& outKeys) {
+        outKeys.clear();
+        outKeys.reserve(s_UniformResolvers.size());
+        for (const auto& kv : s_UniformResolvers) {
+            outKeys.push_back(kv.first);
+        }
+        std::sort(outKeys.begin(), outKeys.end());
     }
 
     void BeginImGuiPass(ID3D12GraphicsCommandList* cmd, D3D12_CPU_DESCRIPTOR_HANDLE rtv, const ImVec2& displaySize) {
@@ -1466,18 +1837,41 @@ namespace RenderUtils::ShaderSystem {
 
             ShaderSourceSpec vertexSource = shader.StageMode == ShaderStageMode::VertexAndPixel
                 ? shader.VertexSource
-                : BuildDefaultVertexSource();
+                : BuildCoreVertexSource();
 
             ShaderSourceSpec pixelSource = shader.PixelSource;
             if (pixelSource.KeyOrPathOrInline.empty()) {
                 if (forGlow && registry.any_of<GlowComponent>(entity)) {
-                    pixelSource = BuildDefaultPixelSource(true, false, registry.get<GlowComponent>(entity).ShaderKey);
+                    pixelSource = BuildEffectPixelSource(true, false, registry.get<GlowComponent>(entity).ShaderKey);
                 } else if (forShadow && registry.any_of<ShadowComponent>(entity)) {
-                    pixelSource = BuildDefaultPixelSource(false, true, registry.get<ShadowComponent>(entity).ShaderKey);
+                    pixelSource = BuildEffectPixelSource(false, true, registry.get<ShadowComponent>(entity).ShaderKey);
                 } else {
-                    pixelSource = BuildDefaultPixelSource(true, false, std::string{});
+                    CompileHelpers::MarkShaderFailure(&shader, "Pixel source is required (ShaderComponent source or effect ShaderKey).");
+                    shader.CompileRequested = false;
+                    continue;
                 }
             }
+            if (pixelSource.KeyOrPathOrInline.empty()) {
+                CompileHelpers::MarkShaderFailure(&shader, "Pixel source is empty.");
+                shader.CompileRequested = false;
+                continue;
+            }
+
+            if (shader.StageMode == ShaderStageMode::VertexAndPixel &&
+                vertexSource.KeyOrPathOrInline.empty() &&
+                vertexSource.Mode != ShaderSourceMode::Inline) {
+                CompileHelpers::MarkShaderFailure(&shader, "VertexAndPixel stage requires explicit vertex source.");
+                shader.CompileRequested = false;
+                continue;
+            }
+
+            const std::vector<ShaderParameter>* effectParams = nullptr;
+            if (forGlow && registry.any_of<GlowComponent>(entity)) {
+                effectParams = &registry.get<GlowComponent>(entity).ShaderParameters;
+            } else if (forShadow && registry.any_of<ShadowComponent>(entity)) {
+                effectParams = &registry.get<ShadowComponent>(entity).ShaderParameters;
+            }
+            const std::vector<ShaderParameter> mergedParams = MergeEffectParameters(shader.Parameters, effectParams);
 
             uint64_t handle = 0;
             ShaderBackendMode backendUsed = ShaderBackendMode::D3DCompileOnly;
@@ -1485,7 +1879,7 @@ namespace RenderUtils::ShaderSystem {
             if (!AcquireProgram(
                 vertexSource,
                 pixelSource,
-                shader.Parameters,
+                mergedParams,
                 shader.StageMode,
                 shader.Backend,
                 forGlow,
@@ -1493,10 +1887,11 @@ namespace RenderUtils::ShaderSystem {
                 handle,
                 backendUsed,
                 error)) {
-                MarkShaderFailure(&shader, error);
+                CompileHelpers::MarkShaderFailure(&shader, error);
                 shader.CompileRequested = false;
                 continue;
             }
+            (void)backendUsed;
 
             shader.IsCompiled = true;
             shader.Dirty = false;

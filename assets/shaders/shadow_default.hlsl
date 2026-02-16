@@ -17,8 +17,10 @@ float4 main(VSOut i) : SV_Target
     float blur = max(0.5, gParams3.z);
     float spread = gParams3.w;
     float inset = gParams1.y;
+    float rounding = max(0.0, gParams1.w);
+    rounding = min(rounding, max(0.0, min(halfSize.x, halfSize.y) - 0.01));
 
-    float dist = sdRoundRect(i.PixelPos - center, halfSize, 10.0);
+    float dist = sdRoundRect(i.PixelPos - center, halfSize, rounding);
     float shadowDist = dist - spread;
 
     float alpha = 0.0;

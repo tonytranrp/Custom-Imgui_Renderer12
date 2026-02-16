@@ -3,6 +3,9 @@
 #include <d3d12.h>
 #include <dxgi1_4.h>
 #include <tchar.h>
+#include <functional>
+#include <string>
+#include "imgui.h"
 
 #ifdef _DEBUG
 #define DX12_ENABLE_DEBUG_LAYER
@@ -15,6 +18,44 @@ struct FrameContext {
 };
 
 namespace DX12Init {
+
+    struct WindowConfig {
+        std::wstring ClassName = L"ImGui DX12 Class";
+        std::wstring Title = L"ImGui DX12 App";
+        int PosX = 100;
+        int PosY = 100;
+        int Width = 1600;
+        int Height = 900;
+        DWORD ClassStyle = CS_CLASSDC;
+        DWORD WindowStyle = WS_OVERLAPPEDWINDOW;
+        DWORD WindowExStyle = 0;
+        int ShowCmd = SW_SHOWDEFAULT;
+    };
+
+    struct RunConfig {
+        WindowConfig Window;
+        float ClearColor[4] = { 0.45f, 0.55f, 0.60f, 1.00f };
+        bool VSync = true;
+        bool AutoInitImGui = true;
+        bool AutoInitShaderSystem = true;
+        bool AutoShowWindow = true;
+        std::function<LRESULT(HWND, UINT, WPARAM, LPARAM, bool&)> MessageHook;
+    };
+
+    struct FramePacket {
+        HWND WindowHandle = nullptr;
+        FrameContext* Frame = nullptr;
+        UINT BackBufferIndex = 0;
+        ID3D12GraphicsCommandList* CommandList = nullptr;
+        ImGuiIO* IO = nullptr;
+        float DeltaTime = 1.0f / 60.0f;
+    };
+
+    struct RuntimeCallbacks {
+        std::function<void(HWND)> OnSetup;
+        std::function<void(const FramePacket&)> OnFrame;
+        std::function<void()> OnShutdown;
+    };
 
     // Constants
     constexpr int NUM_BACK_BUFFERS = 3;
@@ -44,6 +85,8 @@ namespace DX12Init {
     void WaitForLastSubmittedFrame();
     FrameContext* WaitForNextFrameResources();
     void ResizeSwapChain(HWND hWnd, int width, int height);
+    int RunApp(HINSTANCE instance, const RunConfig& runConfig, const RuntimeCallbacks& callbacks);
+    void RequestExit();
     
     // Descriptor Management
     D3D12_CPU_DESCRIPTOR_HANDLE GetCpuSrvHandle(int index);

@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.14)
+cmake_minimum_required(VERSION 3.21)
 
 project(ImGuiDX12App LANGUAGES CXX)
 
@@ -33,28 +33,90 @@ CPMAddPackage(
     GIT_TAG v3.14.0
 )
 
+# Compile-time file embed helper (for shaders/resources).
+set(B_EMBED_SILENCE_DEVMODE_WARNING ON CACHE BOOL "Silence battery::embed dev-mode warning for this project" FORCE)
+CPMAddPackage("gh:batterycenter/embed@1.2.19")
+
 # Fetch Corrosion
 include(FetchContent)
 
-# Explicitly find Rust to help Corrosion (MUST be before FetchContent_MakeAvailable)
-if(NOT Rust_COMPILER)
-    find_program(Rust_COMPILER rustc HINTS "$ENV{USERPROFILE}/.cargo/bin")
-    if(Rust_COMPILER)
-        message(STATUS "Found Rust Compiler: ${Rust_COMPILER}")
-    else()
-        message(WARNING "Rust Compiler not found in standard location")
-    endif()
+# Resolve real rust toolchain binaries (not rustup proxy shims).
+# Corrosion v0.5.0 can mis-parse rustup's "(active, default)" list output in some environments.
+find_program(RUSTUP_EXECUTABLE rustup HINTS "$ENV{USERPROFILE}/.cargo/bin" "$ENV{HOME}/.cargo/bin")
+if(NOT RUSTUP_EXECUTABLE)
+    message(FATAL_ERROR
+        "rustup was not found. Install rustup and run:\n"
+        "  rustup toolchain install stable-x86_64-pc-windows-msvc")
 endif()
 
-# Explicitly find Cargo
-if(NOT Rust_CARGO)
-    find_program(Rust_CARGO cargo HINTS "$ENV{USERPROFILE}/.cargo/bin")
-    if(Rust_CARGO)
-        message(STATUS "Found Cargo: ${Rust_CARGO}")
-    else()
-        message(WARNING "Cargo not found in standard location")
-    endif()
+execute_process(
+    COMMAND "${RUSTUP_EXECUTABLE}" which rustc
+    RESULT_VARIABLE _RUSTUP_WHICH_RUSTC_RESULT
+    OUTPUT_VARIABLE _RUSTC_REAL
+    ERROR_VARIABLE _RUSTUP_WHICH_RUSTC_ERROR
+    OUTPUT_STRIP_TRAILING_WHITESPACE)
+execute_process(
+    COMMAND "${RUSTUP_EXECUTABLE}" which cargo
+    RESULT_VARIABLE _RUSTUP_WHICH_CARGO_RESULT
+    OUTPUT_VARIABLE _CARGO_REAL
+    ERROR_VARIABLE _RUSTUP_WHICH_CARGO_ERROR
+    OUTPUT_STRIP_TRAILING_WHITESPACE)
+
+if(NOT _RUSTUP_WHICH_RUSTC_RESULT EQUAL 0 OR NOT EXISTS "${_RUSTC_REAL}")
+    message(FATAL_ERROR
+        "Failed to resolve real rustc path via rustup.\n"
+        "rustup stderr:\n${_RUSTUP_WHICH_RUSTC_ERROR}\n"
+        "Resolved path: '${_RUSTC_REAL}'\n"
+        "Run: rustup toolchain install stable-x86_64-pc-windows-msvc")
 endif()
+if(NOT _RUSTUP_WHICH_CARGO_RESULT EQUAL 0 OR NOT EXISTS "${_CARGO_REAL}")
+    message(FATAL_ERROR
+        "Failed to resolve real cargo path via rustup.\n"
+        "rustup stderr:\n${_RUSTUP_WHICH_CARGO_ERROR}\n"
+        "Resolved path: '${_CARGO_REAL}'\n"
+        "Run: rustup toolchain install stable-x86_64-pc-windows-msvc")
+endif()
+
+set(Rust_COMPILER "${_RUSTC_REAL}" CACHE FILEPATH "Concrete rustc used by Corrosion" FORCE)
+set(Rust_CARGO "${_CARGO_REAL}" CACHE FILEPATH "Concrete cargo used by Corrosion" FORCE)
+set(Rust_TOOLCHAIN "stable-x86_64-pc-windows-msvc" CACHE STRING "Requested rustup toolchain" FORCE)
+# Force OFF to bypass rustup toolchain-list parsing issues in this project.
+set(Rust_RESOLVE_RUSTUP_TOOLCHAINS OFF CACHE BOOL "Disable rustup toolchain descent in Corrosion" FORCE)
+
+execute_process(
+    COMMAND "${Rust_COMPILER}" --version --verbose
+    RESULT_VARIABLE _RUSTC_VERSION_RESULT
+    OUTPUT_VARIABLE _RUSTC_VERSION_OUT
+    ERROR_VARIABLE _RUSTC_VERSION_ERR
+    OUTPUT_STRIP_TRAILING_WHITESPACE)
+if(NOT _RUSTC_VERSION_RESULT EQUAL 0)
+    message(FATAL_ERROR
+        "Resolved rustc failed sanity check.\n"
+        "Path: ${Rust_COMPILER}\n"
+        "stderr:\n${_RUSTC_VERSION_ERR}\n"
+        "Run: rustup toolchain install stable-x86_64-pc-windows-msvc")
+endif()
+
+execute_process(
+    COMMAND "${Rust_CARGO}" --version --verbose
+    RESULT_VARIABLE _CARGO_VERSION_RESULT
+    OUTPUT_VARIABLE _CARGO_VERSION_OUT
+    ERROR_VARIABLE _CARGO_VERSION_ERR
+    OUTPUT_STRIP_TRAILING_WHITESPACE)
+if(NOT _CARGO_VERSION_RESULT EQUAL 0)
+    message(FATAL_ERROR
+        "Resolved cargo failed sanity check.\n"
+        "Path: ${Rust_CARGO}\n"
+        "stderr:\n${_CARGO_VERSION_ERR}\n"
+        "Run: rustup toolchain install stable-x86_64-pc-windows-msvc")
+endif()
+
+message(STATUS "Using Rust compiler: ${Rust_COMPILER}")
+message(STATUS "Using Cargo: ${Rust_CARGO}")
+message(STATUS "Rust toolchain descent via rustup is disabled for Corrosion in this project.")
+# If Rust path/toolchain changes, clear stale CMake cache:
+#   out/build/<config>/CMakeCache.txt
+#   out/build/<config>/CMakeFiles/
 
 FetchContent_Declare(
     Corrosion
@@ -71,6 +133,9 @@ if(MSVC)
     cmake_policy(SET CMP0091 NEW)
     set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")
     add_compile_definitions(_CRT_SECURE_NO_WARNINGS)
+    # Use one warning level source of truth to avoid CL D9025 (/W3 overridden by /W4).
+    string(REPLACE "/W3" "" CMAKE_C_FLAGS "${CMAKE_C_FLAGS}")
+    string(REPLACE "/W3" "" CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS}")
 endif()
 
 
@@ -117,6 +182,12 @@ add_executable(ImGuiDX12App
     src/Render/RenderUtils/UIComponents.hpp
 )
 
+# Embed shipped shaders at compile time (no runtime asset copy required).
+b_embed(ImGuiDX12App assets/shaders/ui_shader_shared.hlsli)
+b_embed(ImGuiDX12App assets/shaders/ui_default_vs.hlsl)
+b_embed(ImGuiDX12App assets/shaders/glow_default.hlsl)
+b_embed(ImGuiDX12App assets/shaders/shadow_default.hlsl)
+
 target_link_libraries(ImGuiDX12App PRIVATE 
     imgui 
     imgui_backends
@@ -134,18 +205,15 @@ target_link_libraries(ImGuiDX12App PRIVATE
 
 target_include_directories(ImGuiDX12App PRIVATE src)
 
-add_custom_command(TARGET ImGuiDX12App POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:ImGuiDX12App>/assets/shaders"
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different
-        "${CMAKE_SOURCE_DIR}/assets/shaders/ui_shader_shared.hlsli"
-        "$<TARGET_FILE_DIR:ImGuiDX12App>/assets/shaders/ui_shader_shared.hlsli"
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different
-        "${CMAKE_SOURCE_DIR}/assets/shaders/ui_default_vs.hlsl"
-        "$<TARGET_FILE_DIR:ImGuiDX12App>/assets/shaders/ui_default_vs.hlsl"
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different
-        "${CMAKE_SOURCE_DIR}/assets/shaders/glow_default.hlsl"
-        "$<TARGET_FILE_DIR:ImGuiDX12App>/assets/shaders/glow_default.hlsl"
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different
-        "${CMAKE_SOURCE_DIR}/assets/shaders/shadow_default.hlsl"
-        "$<TARGET_FILE_DIR:ImGuiDX12App>/assets/shaders/shadow_default.hlsl"
-)
+option(IMGUI_DX12APP_WARNINGS_AS_ERRORS "Treat project warnings as errors for ImGuiDX12App" ON)
+if(MSVC)
+    target_compile_options(ImGuiDX12App PRIVATE /W4 /permissive-)
+    if(IMGUI_DX12APP_WARNINGS_AS_ERRORS)
+        target_compile_options(ImGuiDX12App PRIVATE /WX)
+    endif()
+else()
+    target_compile_options(ImGuiDX12App PRIVATE -Wall -Wextra -Wpedantic)
+    if(IMGUI_DX12APP_WARNINGS_AS_ERRORS)
+        target_compile_options(ImGuiDX12App PRIVATE -Werror)
+    endif()
+endif()

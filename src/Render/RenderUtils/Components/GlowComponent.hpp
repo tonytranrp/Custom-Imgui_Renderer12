@@ -5,6 +5,7 @@
 #include <vector>
 
 #include "imgui.h"
+#include "ShaderComponent.hpp"
 
 namespace RenderUtils {
     enum class GlowMode {
@@ -31,6 +32,8 @@ namespace RenderUtils {
         float Intensity = 1.0f; // Alpha multiplier (0.0 to 1.0+)
         GlowRenderMode RenderMode = GlowRenderMode::Shader;
         std::string ShaderKey = "glow.default";
+        std::vector<ShaderParameter> ShaderParameters;
+        bool ClipToParent = true;
         GlowMode Mode = GlowMode::GaussianBloom;
         GlowQualityMode QualityMode = GlowQualityMode::Ultra;
         float Falloff = 1.0f;
@@ -66,12 +69,85 @@ namespace RenderUtils {
         GlowComponent& SetMode(GlowMode mode) { Mode = mode; MarkCacheDirty(); return *this; }
         GlowComponent& SetRenderMode(GlowRenderMode mode) { RenderMode = mode; return *this; }
         GlowComponent& SetShaderKey(const std::string& key) { ShaderKey = key; return *this; }
+        GlowComponent& SetClipToParent(bool clip) { ClipToParent = clip; return *this; }
         GlowComponent& SetQualityMode(GlowQualityMode quality) { QualityMode = quality; MarkCacheDirty(); return *this; }
         GlowComponent& SetFalloff(float falloff) { Falloff = falloff; MarkCacheDirty(); return *this; }
         GlowComponent& SetCoreStrength(float strength) { CoreStrength = strength; MarkCacheDirty(); return *this; }
         GlowComponent& SetInnerGlow(bool inner) { InnerGlow = inner; MarkCacheDirty(); return *this; }
         GlowComponent& SetOuterOnly(bool outerOnly) { OuterOnly = outerOnly; MarkCacheDirty(); return *this; }
         GlowComponent& SetRadiusScale(float scale) { RadiusScale = scale; MarkCacheDirty(); return *this; }
+        GlowComponent& SetShaderParameters(const std::vector<ShaderParameter>& params) {
+            ShaderParameters = params;
+            return *this;
+        }
+        GlowComponent& ConfigureShaderParameters(const ShaderParamBuilder& builder) {
+            ShaderParameters = builder.Parameters();
+            return *this;
+        }
+        GlowComponent& ClearShaderParameters() {
+            ShaderParameters.clear();
+            return *this;
+        }
+        GlowComponent& ParamFloat(const std::string& name, float value) {
+            UpsertShaderParameter(name, ShaderParamType::Float, value, ShaderBindingMode::Literal, {}, ShaderAutoUniform::None);
+            return *this;
+        }
+        GlowComponent& ParamInt(const std::string& name, int value) {
+            UpsertShaderParameter(name, ShaderParamType::Int, value, ShaderBindingMode::Literal, {}, ShaderAutoUniform::None);
+            return *this;
+        }
+        GlowComponent& ParamVec2(const std::string& name, const ImVec2& value) {
+            UpsertShaderParameter(name, ShaderParamType::Vec2, value, ShaderBindingMode::Literal, {}, ShaderAutoUniform::None);
+            return *this;
+        }
+        GlowComponent& ParamVec4(const std::string& name, const ImVec4& value) {
+            UpsertShaderParameter(name, ShaderParamType::Vec4, value, ShaderBindingMode::Literal, {}, ShaderAutoUniform::None);
+            return *this;
+        }
+        GlowComponent& ParamColor(const std::string& name, ImU32 value) {
+            UpsertShaderParameter(name, ShaderParamType::Color, value, ShaderBindingMode::Literal, {}, ShaderAutoUniform::None);
+            return *this;
+        }
+        GlowComponent& ParamBool(const std::string& name, bool value) {
+            UpsertShaderParameter(name, ShaderParamType::Bool, value, ShaderBindingMode::Literal, {}, ShaderAutoUniform::None);
+            return *this;
+        }
+        GlowComponent& ParamAutoFloat(const std::string& name, ShaderAutoUniform binding, float fallback = 0.0f) {
+            UpsertShaderParameter(name, ShaderParamType::Float, fallback, ShaderBindingMode::BuiltinAutoUniform, {}, binding);
+            return *this;
+        }
+        GlowComponent& ParamAutoVec2(const std::string& name, ShaderAutoUniform binding, const ImVec2& fallback = ImVec2(0.0f, 0.0f)) {
+            UpsertShaderParameter(name, ShaderParamType::Vec2, fallback, ShaderBindingMode::BuiltinAutoUniform, {}, binding);
+            return *this;
+        }
+        GlowComponent& ParamAutoVec4(const std::string& name, ShaderAutoUniform binding, const ImVec4& fallback = ImVec4(0.0f, 0.0f, 0.0f, 0.0f)) {
+            UpsertShaderParameter(name, ShaderParamType::Vec4, fallback, ShaderBindingMode::BuiltinAutoUniform, {}, binding);
+            return *this;
+        }
+        GlowComponent& ParamBindFloat(const std::string& name, const std::string& uniformKey, float fallback = 0.0f) {
+            UpsertShaderParameter(name, ShaderParamType::Float, fallback, ShaderBindingMode::RegisteredAutoUniform, uniformKey, ShaderAutoUniform::None);
+            return *this;
+        }
+        GlowComponent& ParamBindInt(const std::string& name, const std::string& uniformKey, int fallback = 0) {
+            UpsertShaderParameter(name, ShaderParamType::Int, fallback, ShaderBindingMode::RegisteredAutoUniform, uniformKey, ShaderAutoUniform::None);
+            return *this;
+        }
+        GlowComponent& ParamBindVec2(const std::string& name, const std::string& uniformKey, const ImVec2& fallback = ImVec2(0.0f, 0.0f)) {
+            UpsertShaderParameter(name, ShaderParamType::Vec2, fallback, ShaderBindingMode::RegisteredAutoUniform, uniformKey, ShaderAutoUniform::None);
+            return *this;
+        }
+        GlowComponent& ParamBindVec4(const std::string& name, const std::string& uniformKey, const ImVec4& fallback = ImVec4(0.0f, 0.0f, 0.0f, 0.0f)) {
+            UpsertShaderParameter(name, ShaderParamType::Vec4, fallback, ShaderBindingMode::RegisteredAutoUniform, uniformKey, ShaderAutoUniform::None);
+            return *this;
+        }
+        GlowComponent& ParamBindColor(const std::string& name, const std::string& uniformKey, ImU32 fallback = IM_COL32(255, 255, 255, 255)) {
+            UpsertShaderParameter(name, ShaderParamType::Color, fallback, ShaderBindingMode::RegisteredAutoUniform, uniformKey, ShaderAutoUniform::None);
+            return *this;
+        }
+        GlowComponent& ParamBindBool(const std::string& name, const std::string& uniformKey, bool fallback = false) {
+            UpsertShaderParameter(name, ShaderParamType::Bool, fallback, ShaderBindingMode::RegisteredAutoUniform, uniformKey, ShaderAutoUniform::None);
+            return *this;
+        }
 
         void MarkCacheDirty() { CacheDirty = true; }
 
@@ -105,6 +181,54 @@ namespace RenderUtils {
         }
 
     private:
+        static std::string SanitizeParamName(const std::string& name) {
+            if (name.empty()) {
+                return "Param";
+            }
+            std::string out = name;
+            for (size_t i = 0; i < out.size(); ++i) {
+                const unsigned char ch = static_cast<unsigned char>(out[i]);
+                const bool alphaNum = (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9');
+                if (!(alphaNum || ch == '_')) {
+                    out[i] = '_';
+                }
+            }
+            const unsigned char first = static_cast<unsigned char>(out[0]);
+            if (!((first >= 'a' && first <= 'z') || (first >= 'A' && first <= 'Z') || first == '_')) {
+                out.insert(out.begin(), '_');
+            }
+            return out;
+        }
+
+        void UpsertShaderParameter(
+            const std::string& rawName,
+            ShaderParamType type,
+            const ShaderParamValue& value,
+            ShaderBindingMode bindingMode,
+            const std::string& uniformKey,
+            ShaderAutoUniform autoUniform) {
+            const std::string safeName = SanitizeParamName(rawName);
+            for (auto& param : ShaderParameters) {
+                if (param.Name == safeName) {
+                    param.Type = type;
+                    param.Value = value;
+                    param.BindingMode = bindingMode;
+                    param.UniformKey = uniformKey;
+                    param.AutoUniform = autoUniform;
+                    return;
+                }
+            }
+
+            ShaderParameter param;
+            param.Name = safeName;
+            param.Type = type;
+            param.Value = value;
+            param.BindingMode = bindingMode;
+            param.UniformKey = uniformKey;
+            param.AutoUniform = autoUniform;
+            ShaderParameters.push_back(std::move(param));
+        }
+
         static float EvaluateWeight(GlowMode mode, float t, float falloff, float coreStrength) {
             const float safeT = (std::max)(0.0f, (std::min)(1.0f, t));
             const float safeFalloff = (std::max)(0.2f, (std::min)(4.0f, falloff));

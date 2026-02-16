@@ -1,11 +1,95 @@
 #include "Dx12Init.hpp"
+#include "Render/ImguiRender.hpp"
+#include "Render/RenderUtils/ShaderSystem.hpp"
+#include "imgui.h"
+#include "imgui_impl_win32.h"
 #include <iostream>
+#include <cmath>
+
+extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
 
 #pragma comment(lib, "d3d12.lib")
 #pragma comment(lib, "dxgi.lib")
 #pragma comment(lib, "d3dcompiler.lib")
 
 namespace DX12Init {
+
+    namespace {
+        struct RuntimeState {
+            const RunConfig* Config = nullptr;
+            bool RequestExit = false;
+            bool ImGuiInitialized = false;
+            bool ShaderInitialized = false;
+            bool DeviceInitialized = false;
+            bool WindowCreated = false;
+            bool ClassRegistered = false;
+            HWND WindowHandle = nullptr;
+        };
+
+        RuntimeState s_RuntimeState{};
+
+        LRESULT WINAPI RuntimeWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+            if (s_RuntimeState.Config && s_RuntimeState.Config->MessageHook) {
+                bool handled = false;
+                const LRESULT hookResult = s_RuntimeState.Config->MessageHook(hWnd, msg, wParam, lParam, handled);
+                if (handled) {
+                    return hookResult;
+                }
+            }
+
+            if (s_RuntimeState.ImGuiInitialized && ImGui_ImplWin32_WndProcHandler(hWnd, msg, wParam, lParam)) {
+                return 1;
+            }
+
+            switch (msg) {
+            case WM_SIZE:
+                if (g_pd3dDevice != nullptr && wParam != SIZE_MINIMIZED) {
+                    ResizeSwapChain(hWnd, static_cast<int>(LOWORD(lParam)), static_cast<int>(HIWORD(lParam)));
+                }
+                return 0;
+            case WM_SYSCOMMAND:
+                if ((wParam & 0xfff0) == SC_KEYMENU) {
+                    return 0;
+                }
+                break;
+            case WM_DESTROY:
+                PostQuitMessage(0);
+                return 0;
+            default:
+                break;
+            }
+            return DefWindowProcW(hWnd, msg, wParam, lParam);
+        }
+
+        void UnwindRuntime() {
+            if (s_RuntimeState.DeviceInitialized) {
+                WaitForLastSubmittedFrame();
+            }
+
+            if (s_RuntimeState.ShaderInitialized) {
+                RenderUtils::ShaderSystem::Shutdown();
+                s_RuntimeState.ShaderInitialized = false;
+            }
+            if (s_RuntimeState.ImGuiInitialized) {
+                ImguiRender::Cleanup();
+                s_RuntimeState.ImGuiInitialized = false;
+            }
+            if (s_RuntimeState.DeviceInitialized) {
+                CleanupDeviceD3D();
+                s_RuntimeState.DeviceInitialized = false;
+            }
+
+            if (s_RuntimeState.WindowCreated && s_RuntimeState.WindowHandle) {
+                DestroyWindow(s_RuntimeState.WindowHandle);
+                s_RuntimeState.WindowHandle = nullptr;
+                s_RuntimeState.WindowCreated = false;
+            }
+            if (s_RuntimeState.ClassRegistered && s_RuntimeState.Config) {
+                UnregisterClassW(s_RuntimeState.Config->Window.ClassName.c_str(), GetModuleHandle(nullptr));
+                s_RuntimeState.ClassRegistered = false;
+            }
+        }
+    } // namespace
     
     // Global variable definitions
     FrameContext                 g_frameContext[NUM_FRAMES_IN_FLIGHT] = {};
@@ -208,6 +292,7 @@ namespace DX12Init {
     }
 
     void ResizeSwapChain(HWND hWnd, int width, int height) {
+        (void)hWnd;
         DXGI_SWAP_CHAIN_DESC1 sd;
         g_pSwapChain->GetDesc1(&sd);
         
@@ -217,11 +302,6 @@ namespace DX12Init {
         // Use ResizeBuffers1 as requested
         // We cast to IDXGISwapChain3 to access ResizeBuffers1
         // (g_pSwapChain is already IDXGISwapChain3*)
-        
-        // NodeMask array (usually just 1 entry with 0 or 1 for single GPU)
-        // For basic resizing, passing 0 as node mask and 0 length queue array behaves like ResizeBuffers
-        UINT nodeMasks[] = { 1 }; 
-        IUnknown* commandQueues[] = { g_pd3dCommandQueue };
         
         // Note: ResizeBuffers1 is typically used when you need to change the swap chain's node association or command queues.
         // If we just want to resize, ResizeBuffers is sufficient.
@@ -247,5 +327,185 @@ namespace DX12Init {
         }
         
         CreateRenderTarget();
+    }
+
+    void RequestExit() {
+        s_RuntimeState.RequestExit = true;
+    }
+
+    int RunApp(HINSTANCE instance, const RunConfig& runConfig, const RuntimeCallbacks& callbacks) {
+        s_RuntimeState = {};
+        s_RuntimeState.Config = &runConfig;
+        s_RuntimeState.RequestExit = false;
+
+        const HINSTANCE hInst = instance ? instance : GetModuleHandle(nullptr);
+        WNDCLASSEXW wc = {};
+        wc.cbSize = sizeof(WNDCLASSEXW);
+        wc.style = runConfig.Window.ClassStyle;
+        wc.lpfnWndProc = RuntimeWndProc;
+        wc.hInstance = hInst;
+        wc.lpszClassName = runConfig.Window.ClassName.c_str();
+
+        if (!RegisterClassExW(&wc)) {
+            return 1;
+        }
+        s_RuntimeState.ClassRegistered = true;
+
+        HWND hWnd = CreateWindowExW(
+            runConfig.Window.WindowExStyle,
+            runConfig.Window.ClassName.c_str(),
+            runConfig.Window.Title.c_str(),
+            runConfig.Window.WindowStyle,
+            runConfig.Window.PosX,
+            runConfig.Window.PosY,
+            runConfig.Window.Width,
+            runConfig.Window.Height,
+            nullptr,
+            nullptr,
+            hInst,
+            nullptr);
+        if (hWnd == nullptr) {
+            UnwindRuntime();
+            return 1;
+        }
+        s_RuntimeState.WindowHandle = hWnd;
+        s_RuntimeState.WindowCreated = true;
+
+        if (!CreateDeviceD3D(hWnd)) {
+            UnwindRuntime();
+            return 1;
+        }
+        s_RuntimeState.DeviceInitialized = true;
+
+        if (runConfig.AutoInitImGui) {
+            ImguiRender::Init(
+                hWnd,
+                g_pd3dDevice,
+                NUM_FRAMES_IN_FLIGHT,
+                DXGI_FORMAT_R8G8B8A8_UNORM,
+                g_pd3dSrvDescHeap,
+                g_pd3dCommandQueue);
+            s_RuntimeState.ImGuiInitialized = true;
+        }
+
+        if (runConfig.AutoInitShaderSystem) {
+            RenderUtils::ShaderSystem::Initialize(g_pd3dDevice);
+            s_RuntimeState.ShaderInitialized = true;
+        }
+
+        if (runConfig.AutoShowWindow) {
+            ShowWindow(hWnd, runConfig.Window.ShowCmd);
+            UpdateWindow(hWnd);
+        }
+
+        if (callbacks.OnSetup) {
+            callbacks.OnSetup(hWnd);
+        }
+
+        bool done = false;
+        while (!done && !s_RuntimeState.RequestExit) {
+            MSG msg;
+            while (::PeekMessage(&msg, nullptr, 0U, 0U, PM_REMOVE)) {
+                ::TranslateMessage(&msg);
+                ::DispatchMessage(&msg);
+                if (msg.message == WM_QUIT) {
+                    done = true;
+                }
+            }
+            if (done || s_RuntimeState.RequestExit) {
+                break;
+            }
+
+            FrameContext* frameCtx = WaitForNextFrameResources();
+            if (!frameCtx || !frameCtx->CommandAllocator || !g_pd3dCommandList || !g_pSwapChain) {
+                break;
+            }
+            const UINT backBufferIdx = g_pSwapChain->GetCurrentBackBufferIndex();
+            frameCtx->CommandAllocator->Reset();
+            g_pd3dCommandList->Reset(frameCtx->CommandAllocator, nullptr);
+
+            ImGuiIO* io = nullptr;
+            if (s_RuntimeState.ImGuiInitialized) {
+                ImguiRender::NewFrame();
+                io = &ImGui::GetIO();
+            }
+
+            float deltaTime = 1.0f / 60.0f;
+            if (io && std::isfinite(io->Framerate) && io->Framerate > 1.0f) {
+                deltaTime = 1.0f / io->Framerate;
+            }
+            if (!std::isfinite(deltaTime) || deltaTime < 0.0f) {
+                deltaTime = 1.0f / 60.0f;
+            }
+            if (deltaTime > 0.25f) {
+                deltaTime = 0.25f;
+            }
+
+            const ImVec2 displaySize = io ? io->DisplaySize : ImVec2(static_cast<float>(runConfig.Window.Width), static_cast<float>(runConfig.Window.Height));
+            if (s_RuntimeState.ShaderInitialized && s_RuntimeState.ImGuiInitialized) {
+                RenderUtils::ShaderSystem::BeginImGuiPass(
+                    g_pd3dCommandList,
+                    g_mainRenderTargetDescriptor[backBufferIdx],
+                    displaySize);
+            }
+
+            FramePacket packet;
+            packet.WindowHandle = hWnd;
+            packet.Frame = frameCtx;
+            packet.BackBufferIndex = backBufferIdx;
+            packet.CommandList = g_pd3dCommandList;
+            packet.IO = io;
+            packet.DeltaTime = deltaTime;
+            if (callbacks.OnFrame) {
+                callbacks.OnFrame(packet);
+            }
+
+            D3D12_RESOURCE_BARRIER barrier = {};
+            barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+            barrier.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
+            barrier.Transition.pResource = g_mainRenderTargetResource[backBufferIdx];
+            barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+            barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_PRESENT;
+            barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_RENDER_TARGET;
+            g_pd3dCommandList->ResourceBarrier(1, &barrier);
+
+            g_pd3dCommandList->ClearRenderTargetView(
+                g_mainRenderTargetDescriptor[backBufferIdx],
+                runConfig.ClearColor,
+                0,
+                nullptr);
+            g_pd3dCommandList->OMSetRenderTargets(1, &g_mainRenderTargetDescriptor[backBufferIdx], FALSE, nullptr);
+            g_pd3dCommandList->SetDescriptorHeaps(1, &g_pd3dSrvDescHeap);
+
+            if (s_RuntimeState.ImGuiInitialized) {
+                ImGui::Render();
+                ImguiRender::RenderDrawData(g_pd3dCommandList);
+            }
+            if (s_RuntimeState.ShaderInitialized && s_RuntimeState.ImGuiInitialized) {
+                RenderUtils::ShaderSystem::EndImGuiPass();
+            }
+
+            barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
+            barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_PRESENT;
+            g_pd3dCommandList->ResourceBarrier(1, &barrier);
+            g_pd3dCommandList->Close();
+
+            g_pd3dCommandQueue->ExecuteCommandLists(1, (ID3D12CommandList* const*)&g_pd3dCommandList);
+            g_pSwapChain->Present(runConfig.VSync ? 1 : 0, 0);
+
+            const UINT64 fenceValue = g_fenceLastSignaledValue + 1;
+            g_pd3dCommandQueue->Signal(g_fence, fenceValue);
+            g_fenceLastSignaledValue = fenceValue;
+            frameCtx->FenceValue = fenceValue;
+        }
+
+        WaitForLastSubmittedFrame();
+        if (callbacks.OnShutdown) {
+            callbacks.OnShutdown();
+        }
+
+        UnwindRuntime();
+        s_RuntimeState = {};
+        return 0;
     }
 }
