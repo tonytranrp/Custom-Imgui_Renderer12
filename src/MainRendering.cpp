@@ -320,9 +320,77 @@ namespace MainRendering {
                                     .With<RenderUtils::TransformComponent>(RenderUtils::TransformComponent().SetPosition(ImVec2(648, 18)).SetSize(ImVec2(584, 360)))
                                     .With<RenderUtils::StyleComponent>(RenderUtils::StyleComponent().SetBackgroundColor(IM_COL32(24, 27, 34, 255)).SetRounding(8.0f))
                                     .With<RenderUtils::TextComponent>(RenderUtils::TextComponent("Glow Modes", IM_COL32(220, 230, 245, 255)))
-                                    .Child(RenderUtils::UIBuilder::Begin(g_registry).Create<RenderUtils::ContainerType::Panel>("GlowGaussianCard").With<RenderUtils::TransformComponent>(RenderUtils::TransformComponent().SetPosition(ImVec2(20, 70)).SetSize(ImVec2(170, 230))).With<RenderUtils::StyleComponent>(RenderUtils::StyleComponent().SetBackgroundColor(IM_COL32(48, 54, 64, 255)).SetRounding(10.0f)).With<RenderUtils::GlowComponent>(RenderUtils::GlowComponent(IM_COL32(102, 180, 255, 255), 34.0f, 1.6f).SetMode(RenderUtils::GlowMode::GaussianBloom).SetRenderMode(RenderUtils::GlowRenderMode::Shader).ParamBindFloat("u_time", "time", 0.0f)).With<RenderUtils::ShaderComponent>(RenderUtils::ShaderComponent().SetPixelSource(RenderUtils::ShaderSourceSpec().SetMode(RenderUtils::ShaderSourceMode::EmbeddedCpp).SetSource("glow.default").SetTarget("ps_5_0"))).With<RenderUtils::TextComponent>(RenderUtils::TextComponent("Gaussian", IM_COL32(235, 245, 255, 255)).Align(RenderUtils::TextAlign::Center)))
-                                    .Child(RenderUtils::UIBuilder::Begin(g_registry).Create<RenderUtils::ContainerType::Panel>("GlowNeonCard").With<RenderUtils::TransformComponent>(RenderUtils::TransformComponent().SetPosition(ImVec2(206, 70)).SetSize(ImVec2(170, 230))).With<RenderUtils::StyleComponent>(RenderUtils::StyleComponent().SetBackgroundColor(IM_COL32(45, 52, 61, 255)).SetRounding(10.0f)).With<RenderUtils::GlowComponent>(RenderUtils::GlowComponent(IM_COL32(88, 245, 225, 255), 36.0f, 1.9f).SetMode(RenderUtils::GlowMode::NeonTube).SetCoreStrength(1.1f).SetInnerGlow(true).SetRenderMode(RenderUtils::GlowRenderMode::Shader).ParamBindFloat("u_time", "time", 0.0f).ParamBindVec2("u_mouse", "mouse", ImVec2(0.0f, 0.0f))).With<RenderUtils::ShaderComponent>(RenderUtils::ShaderComponent().SetPixelSource(RenderUtils::ShaderSourceSpec().SetMode(RenderUtils::ShaderSourceMode::EmbeddedCpp).SetSource("glow.default").SetTarget("ps_5_0"))).With<RenderUtils::TextComponent>(RenderUtils::TextComponent("Neon", IM_COL32(235, 245, 255, 255)).Align(RenderUtils::TextAlign::Center)))
-                                    .Child(RenderUtils::UIBuilder::Begin(g_registry).Create<RenderUtils::ContainerType::Panel>("GlowAmbientCard").With<RenderUtils::TransformComponent>(RenderUtils::TransformComponent().SetPosition(ImVec2(392, 70)).SetSize(ImVec2(170, 230))).With<RenderUtils::StyleComponent>(RenderUtils::StyleComponent().SetBackgroundColor(IM_COL32(47, 53, 63, 255)).SetRounding(10.0f)).With<RenderUtils::GlowComponent>(RenderUtils::GlowComponent(IM_COL32(198, 160, 255, 255), 42.0f, 1.35f).SetMode(RenderUtils::GlowMode::AmbientSoft).SetRenderMode(RenderUtils::GlowRenderMode::Shader).ParamBindFloat("u_time", "time", 0.0f)).With<RenderUtils::ShaderComponent>(RenderUtils::ShaderComponent().SetPixelSource(RenderUtils::ShaderSourceSpec().SetMode(RenderUtils::ShaderSourceMode::EmbeddedCpp).SetSource("glow.default").SetTarget("ps_5_0"))).With<RenderUtils::TextComponent>(RenderUtils::TextComponent("Ambient", IM_COL32(235, 245, 255, 255)).Align(RenderUtils::TextAlign::Center)))
+                                    .Child(RenderUtils::UIBuilder::Begin(g_registry)
+                                        .Create<RenderUtils::ContainerType::Panel>("GlowGaussianCard")
+                                        .With<RenderUtils::TransformComponent>(RenderUtils::TransformComponent().SetPosition(ImVec2(20, 70)).SetSize(ImVec2(170, 230)))
+                                        .With<RenderUtils::StyleComponent>(RenderUtils::StyleComponent().SetBackgroundColor(IM_COL32(48, 54, 64, 255)).SetRounding(10.0f))
+                                        .With<RenderUtils::GlowComponent>(
+                                            RenderUtils::GlowComponent(IM_COL32(102, 180, 255, 255), 22.0f, 0.86f)
+                                                .SetShaderKey("glow.default")
+                                                .SetMode(RenderUtils::GlowMode::GaussianBloom)
+                                                .SetCoreStrength(0.30f)
+                                                .SetClipToParent(false)
+                                                .SetRenderMode(RenderUtils::GlowRenderMode::Shader)
+                                                .ParamBindFloat("u_time", "time", 0.0f))
+                                        .With<RenderUtils::ShaderComponent>(
+                                            RenderUtils::ShaderComponent()
+                                                .SetPixelSource(
+                                                    RenderUtils::ShaderSourceSpec()
+                                                        .SetMode(RenderUtils::ShaderSourceMode::EmbeddedCpp)
+                                                        .SetSource("glow.default")
+                                                        .SetTarget("ps_5_0")))
+                                        .With<RenderUtils::TextComponent>(
+                                            RenderUtils::TextComponent("Gaussian", IM_COL32(235, 245, 255, 255))
+                                                .Align(RenderUtils::TextAlign::Center))
+                                    )
+                                    .Child(RenderUtils::UIBuilder::Begin(g_registry)
+                                        .Create<RenderUtils::ContainerType::Panel>("GlowNeonCard")
+                                        .With<RenderUtils::TransformComponent>(RenderUtils::TransformComponent().SetPosition(ImVec2(214, 70)).SetSize(ImVec2(170, 230)))
+                                        .With<RenderUtils::StyleComponent>(RenderUtils::StyleComponent().SetBackgroundColor(IM_COL32(45, 52, 61, 255)).SetRounding(10.0f))
+                                        .With<RenderUtils::GlowComponent>(
+                                            RenderUtils::GlowComponent(IM_COL32(88, 245, 225, 255), 22.0f, 0.82f)
+                                                .SetShaderKey("glow.default")
+                                                .SetMode(RenderUtils::GlowMode::NeonTube)
+                                                .SetCoreStrength(0.42f)
+                                                .SetInnerGlow(true)
+                                                .SetClipToParent(false)
+                                                .SetRenderMode(RenderUtils::GlowRenderMode::Shader)
+                                                .ParamBindFloat("u_time", "time", 0.0f)
+                                                .ParamBindVec2("u_mouse", "mouse", ImVec2(0.0f, 0.0f)))
+                                        .With<RenderUtils::ShaderComponent>(
+                                            RenderUtils::ShaderComponent()
+                                                .SetPixelSource(
+                                                    RenderUtils::ShaderSourceSpec()
+                                                        .SetMode(RenderUtils::ShaderSourceMode::EmbeddedCpp)
+                                                        .SetSource("glow.default")
+                                                        .SetTarget("ps_5_0")))
+                                        .With<RenderUtils::TextComponent>(
+                                            RenderUtils::TextComponent("Neon", IM_COL32(235, 245, 255, 255))
+                                                .Align(RenderUtils::TextAlign::Center))
+                                    )
+                                    .Child(RenderUtils::UIBuilder::Begin(g_registry)
+                                        .Create<RenderUtils::ContainerType::Panel>("GlowAmbientCard")
+                                        .With<RenderUtils::TransformComponent>(RenderUtils::TransformComponent().SetPosition(ImVec2(408, 70)).SetSize(ImVec2(170, 230)))
+                                        .With<RenderUtils::StyleComponent>(RenderUtils::StyleComponent().SetBackgroundColor(IM_COL32(47, 53, 63, 255)).SetRounding(10.0f))
+                                        .With<RenderUtils::GlowComponent>(
+                                            RenderUtils::GlowComponent(IM_COL32(198, 160, 255, 255), 27.0f, 0.78f)
+                                                .SetShaderKey("glow.default")
+                                                .SetMode(RenderUtils::GlowMode::AmbientSoft)
+                                                .SetCoreStrength(0.26f)
+                                                .SetClipToParent(false)
+                                                .SetRenderMode(RenderUtils::GlowRenderMode::Shader)
+                                                .ParamBindFloat("u_time", "time", 0.0f))
+                                        .With<RenderUtils::ShaderComponent>(
+                                            RenderUtils::ShaderComponent()
+                                                .SetPixelSource(
+                                                    RenderUtils::ShaderSourceSpec()
+                                                        .SetMode(RenderUtils::ShaderSourceMode::EmbeddedCpp)
+                                                        .SetSource("glow.default")
+                                                        .SetTarget("ps_5_0")))
+                                        .With<RenderUtils::TextComponent>(
+                                            RenderUtils::TextComponent("Ambient", IM_COL32(235, 245, 255, 255))
+                                                .Align(RenderUtils::TextAlign::Center))
+                                    )
                                     .Child(RenderUtils::UIBuilder::Begin(g_registry)
                                         .Create<RenderUtils::ContainerType::Panel>("EffectsGlowQualityOptions")
                                         .With<RenderUtils::TransformComponent>(RenderUtils::TransformComponent().SetPosition(ImVec2(20, 312)).SetSize(ImVec2(542, 34)))
@@ -356,10 +424,12 @@ namespace MainRendering {
                                                 if (!enabled) {
                                                     reg.emplace_or_replace<RenderUtils::GlowComponent>(
                                                         e,
-                                                        RenderUtils::GlowComponent(IM_COL32(88, 245, 225, 255), 22.0f, 0.8f)
+                                                        RenderUtils::GlowComponent(IM_COL32(88, 245, 225, 255), 20.0f, 0.62f)
+                                                            .SetShaderKey("glow.default")
                                                             .SetMode(RenderUtils::GlowMode::NeonTube)
-                                                            .SetCoreStrength(0.65f)
+                                                            .SetCoreStrength(0.44f)
                                                             .SetInnerGlow(true)
+                                                            .SetClipToParent(false)
                                                             .SetSamples(14)
                                                             .ParamBindFloat("u_time", "time", 0.0f)
                                                             .ParamBindVec2("u_mouse", "mouse", ImVec2(0.0f, 0.0f)));
@@ -373,7 +443,7 @@ namespace MainRendering {
                                                                 return;
                                                             }
                                                             auto& glow = r.get<RenderUtils::GlowComponent>(ent);
-                                                            glow.SetIntensity(0.35f + 0.7f * std::fabs(std::sin(t * 6.28318f)));
+                                                            glow.SetIntensity(0.26f + 0.30f * std::fabs(std::sin(t * 6.28318f)));
                                                         })
                                                         .Start();
                                                 } else {

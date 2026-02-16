@@ -1039,18 +1039,7 @@ namespace RenderUtils {
                 auto& style = btnView.get<StyleComponent>(entity);
                 const auto& input = btnView.get<InputStateComponent>(entity);
 
-                // Handle Click
-                // Note: We check if clicked THIS frame.
-                // InputState.IsClicked is true while mouse is down.
-                // We want "Just Pressed".
-                // Ideally InputState should have IsPressed vs IsHeld.
-                // For now, let's use ImGui directly for logic or rely on CustomComponent logic previously used.
-                // But wait, the user wants "library handles it".
-                // If we use `UpdateInput`, we know if it's clicked.
-                // Let's check if hovered and mouse released? Or mouse pressed.
-                // ImGui::IsMouseClicked(0) is global.
-                // If input.IsHovered && ImGui::IsMouseClicked(0), then trigger.
-                if (input.IsHovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+                if (input.IsHovered && input.JustPressed) {
                     SetCurrentTab(trigger.TabId);
                 }
 
@@ -2079,6 +2068,9 @@ namespace RenderUtils {
     }
 
     entt::entity UIRenderer::FindEntityByName(entt::registry& registry, const char* name) {
+        if (name == nullptr) {
+            return entt::null;
+        }
         auto view = registry.view<ContainerComponent>();
         for (auto entity : view) {
             const auto& container = view.get<ContainerComponent>(entity);
@@ -2090,6 +2082,9 @@ namespace RenderUtils {
     }
 
     entt::entity UIRenderer::FindChildByName(entt::registry& registry, entt::entity parent, const char* name) {
+        if (name == nullptr) {
+            return entt::null;
+        }
         auto view = registry.view<ParentComponent, ContainerComponent>();
         for (auto entity : view) {
             const auto& pc = view.get<ParentComponent>(entity);

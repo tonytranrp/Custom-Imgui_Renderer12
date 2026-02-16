@@ -5,6 +5,10 @@ project(ImGuiDX12App LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+# Prefer optimized code generation for release-style configurations.s
+set(CMAKE_INTERPROCEDURAL_OPTIMIZATION_RELEASE ON)
+set(CMAKE_INTERPROCEDURAL_OPTIMIZATION_RELWITHDEBINFO ON)
+
 # CPM.cmake - CMake Package Manager
 set(CPM_DOWNLOAD_VERSION 0.40.2)
 set(CPM_DOWNLOAD_LOCATION "${CMAKE_BINARY_DIR}/cmake/CPM_${CPM_DOWNLOAD_VERSION}.cmake")
@@ -200,7 +204,7 @@ target_link_libraries(ImGuiDX12App PRIVATE
     ws2_32.lib
     userenv.lib
     bcrypt.lib
-    msvcrtd.lib
+    $<$<CONFIG:Debug>:msvcrtd.lib>
 )
 
 target_include_directories(ImGuiDX12App PRIVATE src)
@@ -208,6 +212,16 @@ target_include_directories(ImGuiDX12App PRIVATE src)
 option(IMGUI_DX12APP_WARNINGS_AS_ERRORS "Treat project warnings as errors for ImGuiDX12App" ON)
 if(MSVC)
     target_compile_options(ImGuiDX12App PRIVATE /W4 /permissive-)
+    target_compile_options(ImGuiDX12App PRIVATE
+        $<$<CONFIG:Release>:/O2 /Oi /Ot /Gy /Gw /GF /Zc:inline>
+        $<$<CONFIG:RelWithDebInfo>:/O2 /Oi /Ot /Gy /Gw /GF /Zc:inline>
+        $<$<CONFIG:MinSizeRel>:/O2 /Oi /Ot /Gy /Gw /GF /Zc:inline>
+    )
+    target_link_options(ImGuiDX12App PRIVATE
+        $<$<CONFIG:Release>:/OPT:REF /OPT:ICF /INCREMENTAL:NO>
+        $<$<CONFIG:RelWithDebInfo>:/OPT:REF /OPT:ICF /INCREMENTAL:NO>
+        $<$<CONFIG:MinSizeRel>:/OPT:REF /OPT:ICF /INCREMENTAL:NO>
+    )
     if(IMGUI_DX12APP_WARNINGS_AS_ERRORS)
         target_compile_options(ImGuiDX12App PRIVATE /WX)
     endif()

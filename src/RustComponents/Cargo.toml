@@ -10,3 +10,11 @@ crate-type = ["staticlib"]
 ureq = "2.9"
 image = { version = "0.24", default-features = false, features = ["gif", "jpeg", "png", "webp", "bmp", "tga"] }
 lazy_static = "1.4.0"
+
+[profile.release]
+# Match C++ Release intent: optimize for speed while reducing binary size.
+opt-level = 2
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+strip = "symbols"

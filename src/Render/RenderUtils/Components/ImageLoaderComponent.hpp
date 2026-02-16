@@ -1467,18 +1467,33 @@ namespace Components {
             auto view = registry.view<ImageLoader>();
             for (auto entity : view) {
                 auto& loader = view.get<ImageLoader>(entity);
-                detail::EnsureRuntimeInitialized(loader, false);
                 if (!loader.StartupRequired) {
                     continue;
                 }
 
                 ++progress.totalRequired;
 
+                if (!loader.sources_initialized || loader.source_states.empty()) {
+                    const auto normalizedSources = detail::BuildNormalizedSources(loader);
+                    if (normalizedSources.empty() || loader.state == ImageLoader::LoadState::Failed) {
+                        ++progress.failedRequired;
+                    } else {
+                        ++progress.loadingRequired;
+                        if (progress.currentLabel.empty()) {
+                            progress.currentLabel = loader.LastStatusMessage.empty() ? "Loading image..." : loader.LastStatusMessage;
+                        }
+                    }
+                    continue;
+                }
+
                 bool hasRenderable = false;
                 bool hasLoading = false;
                 for (const auto& runtime : loader.source_states) {
                     hasRenderable = hasRenderable || detail::IsRuntimeRenderable(runtime);
                     hasLoading = hasLoading || detail::IsRuntimeLoading(runtime);
+                }
+                if (!hasRenderable && loader.state == ImageLoader::LoadState::Loaded && loader.texture != nullptr) {
+                    hasRenderable = true;
                 }
 
                 if (hasRenderable) {

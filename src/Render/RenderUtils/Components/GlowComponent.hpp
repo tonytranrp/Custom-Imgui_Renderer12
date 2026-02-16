@@ -33,7 +33,7 @@ namespace RenderUtils {
         GlowRenderMode RenderMode = GlowRenderMode::Shader;
         std::string ShaderKey = "glow.default";
         std::vector<ShaderParameter> ShaderParameters;
-        bool ClipToParent = true;
+        bool ClipToParent = false;
         GlowMode Mode = GlowMode::GaussianBloom;
         GlowQualityMode QualityMode = GlowQualityMode::Ultra;
         float Falloff = 1.0f;

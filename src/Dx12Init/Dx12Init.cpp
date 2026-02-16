@@ -5,6 +5,9 @@
 #include "imgui_impl_win32.h"
 #include <iostream>
 #include <cmath>
+#include <exception>
+#include <string>
+#include <wrl/client.h>
 
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
 
@@ -15,6 +18,8 @@ extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg
 namespace DX12Init {
 
     namespace {
+        using Microsoft::WRL::ComPtr;
+
         struct RuntimeState {
             const RunConfig* Config = nullptr;
             bool RequestExit = false;
@@ -27,6 +32,16 @@ namespace DX12Init {
         };
 
         RuntimeState s_RuntimeState{};
+
+        void LogRuntimeError(const char* stage, const char* message) {
+            std::string line = "[DX12Init::RunApp] ";
+            line += stage ? stage : "UnknownStage";
+            line += ": ";
+            line += message ? message : "Unknown error";
+            line += "\n";
+            OutputDebugStringA(line.c_str());
+            std::cerr << line;
+        }
 
         LRESULT WINAPI RuntimeWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             if (s_RuntimeState.Config && s_RuntimeState.Config->MessageHook) {
@@ -207,16 +222,15 @@ namespace DX12Init {
             return false;
 
         {
-            IDXGIFactory4* dxgiFactory = nullptr;
-            IDXGISwapChain1* swapChain1 = nullptr;
-            if (CreateDXGIFactory1(IID_PPV_ARGS(&dxgiFactory)) != S_OK)
+            ComPtr<IDXGIFactory4> dxgiFactory;
+            ComPtr<IDXGISwapChain1> swapChain1;
+            if (CreateDXGIFactory1(IID_PPV_ARGS(dxgiFactory.GetAddressOf())) != S_OK)
                 return false;
-            if (dxgiFactory->CreateSwapChainForHwnd(g_pd3dCommandQueue, hWnd, &sd, nullptr, nullptr, &swapChain1) != S_OK)
+            if (dxgiFactory->CreateSwapChainForHwnd(
+                g_pd3dCommandQueue, hWnd, &sd, nullptr, nullptr, swapChain1.GetAddressOf()) != S_OK)
                 return false;
             if (swapChain1->QueryInterface(IID_PPV_ARGS(&g_pSwapChain)) != S_OK)
                 return false;
-            swapChain1->Release();
-            dxgiFactory->Release();
             g_pSwapChain->SetMaximumFrameLatency(NUM_BACK_BUFFERS);
             g_hSwapChainWaitableObject = g_pSwapChain->GetFrameLatencyWaitableObject();
         }
@@ -398,8 +412,22 @@ namespace DX12Init {
             UpdateWindow(hWnd);
         }
 
+        bool setupSucceeded = true;
         if (callbacks.OnSetup) {
-            callbacks.OnSetup(hWnd);
+            try {
+                callbacks.OnSetup(hWnd);
+            } catch (const std::exception& ex) {
+                LogRuntimeError("OnSetup", ex.what());
+                setupSucceeded = false;
+            } catch (...) {
+                LogRuntimeError("OnSetup", "Unhandled non-standard exception.");
+                setupSucceeded = false;
+            }
+        }
+        if (!setupSucceeded) {
+            UnwindRuntime();
+            s_RuntimeState = {};
+            return 1;
         }
 
         bool done = false;
@@ -442,11 +470,13 @@ namespace DX12Init {
             }
 
             const ImVec2 displaySize = io ? io->DisplaySize : ImVec2(static_cast<float>(runConfig.Window.Width), static_cast<float>(runConfig.Window.Height));
+            bool shaderPassActive = false;
             if (s_RuntimeState.ShaderInitialized && s_RuntimeState.ImGuiInitialized) {
                 RenderUtils::ShaderSystem::BeginImGuiPass(
                     g_pd3dCommandList,
                     g_mainRenderTargetDescriptor[backBufferIdx],
                     displaySize);
+                shaderPassActive = true;
             }
 
             FramePacket packet;
@@ -457,7 +487,27 @@ namespace DX12Init {
             packet.IO = io;
             packet.DeltaTime = deltaTime;
             if (callbacks.OnFrame) {
-                callbacks.OnFrame(packet);
+                try {
+                    callbacks.OnFrame(packet);
+                } catch (const std::exception& ex) {
+                    if (shaderPassActive) {
+                        RenderUtils::ShaderSystem::EndImGuiPass();
+                        shaderPassActive = false;
+                    }
+                    LogRuntimeError("OnFrame", ex.what());
+                    done = true;
+                    s_RuntimeState.RequestExit = true;
+                    continue;
+                } catch (...) {
+                    if (shaderPassActive) {
+                        RenderUtils::ShaderSystem::EndImGuiPass();
+                        shaderPassActive = false;
+                    }
+                    LogRuntimeError("OnFrame", "Unhandled non-standard exception.");
+                    done = true;
+                    s_RuntimeState.RequestExit = true;
+                    continue;
+                }
             }
 
             D3D12_RESOURCE_BARRIER barrier = {};
@@ -481,8 +531,9 @@ namespace DX12Init {
                 ImGui::Render();
                 ImguiRender::RenderDrawData(g_pd3dCommandList);
             }
-            if (s_RuntimeState.ShaderInitialized && s_RuntimeState.ImGuiInitialized) {
+            if (shaderPassActive) {
                 RenderUtils::ShaderSystem::EndImGuiPass();
+                shaderPassActive = false;
             }
 
             barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
@@ -501,7 +552,13 @@ namespace DX12Init {
 
         WaitForLastSubmittedFrame();
         if (callbacks.OnShutdown) {
-            callbacks.OnShutdown();
+            try {
+                callbacks.OnShutdown();
+            } catch (const std::exception& ex) {
+                LogRuntimeError("OnShutdown", ex.what());
+            } catch (...) {
+                LogRuntimeError("OnShutdown", "Unhandled non-standard exception.");
+            }
         }
 
         UnwindRuntime();

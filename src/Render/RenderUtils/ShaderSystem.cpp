@@ -940,24 +940,6 @@ namespace RenderUtils::ShaderSystem {
             return value;
         }
 
-        float QualityModeScale(GlowQualityMode mode) {
-            switch (mode) {
-            case GlowQualityMode::Performance: return 0.84f;
-            case GlowQualityMode::Balanced: return 1.0f;
-            case GlowQualityMode::Ultra: return 1.14f;
-            }
-            return 1.0f;
-        }
-
-        float GlowModeScale(GlowMode mode) {
-            switch (mode) {
-            case GlowMode::GaussianBloom: return 1.0f;
-            case GlowMode::NeonTube: return 0.9f;
-            case GlowMode::AmbientSoft: return 1.30f;
-            }
-            return 1.0f;
-        }
-
         bool RenderSingleDraw(
             QueuedDraw& draw,
             ID3D12GraphicsCommandList* cmd,
@@ -1549,16 +1531,124 @@ namespace RenderUtils::ShaderSystem {
                 globals.Params1[1] = glow->OuterOnly ? 1.0f : 0.0f;
                 globals.Params1[2] = glow->InnerGlow ? 1.0f : 0.0f;
                 globals.Params1[3] = shapeRounding;
-                globals.Params3[0] = static_cast<float>(static_cast<int>(glow->QualityMode));
+                const float qualityIndex = static_cast<float>(static_cast<int>(glow->QualityMode));
+                const float alphaEpsilon = 0.0035f;
+                const float supportCutoffAlpha =
+                    glow->Mode == GlowMode::NeonTube
+                    ? 0.075f
+                    : (glow->Mode == GlowMode::AmbientSoft ? 0.020f : 0.016f);
+                const float envelopePad = 8.0f;
 
-                const float glowMargin =
+                const float modeRadiusScale =
+                    glow->Mode == GlowMode::NeonTube
+                    ? 0.84f
+                    : (glow->Mode == GlowMode::AmbientSoft ? 1.18f : 1.0f);
+                const float modeEnergyScale =
+                    glow->Mode == GlowMode::NeonTube
+                    ? 1.08f
+                    : (glow->Mode == GlowMode::AmbientSoft ? 0.82f : 1.0f);
+                const float modeExponent =
+                    glow->Mode == GlowMode::NeonTube
+                    ? 1.72f
+                    : (glow->Mode == GlowMode::AmbientSoft ? 1.18f : 1.35f);
+                const float outerWeight =
+                    glow->Mode == GlowMode::NeonTube
+                    ? 0.84f
+                    : (glow->Mode == GlowMode::AmbientSoft ? 1.15f : 1.0f);
+
+                const float qualityRadiusScale =
+                    glow->QualityMode == GlowQualityMode::Performance
+                    ? 0.90f
+                    : (glow->QualityMode == GlowQualityMode::Ultra ? 1.08f : 1.0f);
+                const float qualityEnergyScale =
+                    glow->QualityMode == GlowQualityMode::Performance
+                    ? 0.86f
+                    : (glow->QualityMode == GlowQualityMode::Ultra ? 1.06f : 1.0f);
+
+                const float radius = (std::max)(1.0f, glow->Radius * glow->RadiusScale);
+                const float falloff = (std::max)(0.2f, glow->Falloff);
+                const float falloffScale = (std::max)(0.35f, (std::min)(2.8f, 1.0f / falloff));
+                const float radiusEff = (std::max)(1.0f, radius * modeRadiusScale * qualityRadiusScale * falloffScale);
+                const float edgeReach =
                     (std::max)(
-                        0.0f,
-                        glow->Radius * glow->RadiusScale * DrawExecutionHelpers::QualityModeScale(glow->QualityMode) * DrawExecutionHelpers::GlowModeScale(glow->Mode) + 4.0f);
-                globals.DrawMinMax[0] -= glowMargin;
-                globals.DrawMinMax[1] -= glowMargin;
-                globals.DrawMinMax[2] += glowMargin;
-                globals.DrawMinMax[3] += glowMargin;
+                        2.0f,
+                        radiusEff * (glow->Mode == GlowMode::NeonTube
+                            ? 0.34f
+                            : (glow->Mode == GlowMode::AmbientSoft ? 0.56f : 0.46f)));
+                const float modeEdgeFadeScale =
+                    glow->Mode == GlowMode::NeonTube
+                    ? 0.82f
+                    : (glow->Mode == GlowMode::AmbientSoft ? 1.12f : 1.0f);
+                const float baseEdgeFadePx = (std::max)(
+                    10.0f,
+                    (std::min)(
+                        72.0f,
+                        radiusEff * (
+                            glow->QualityMode == GlowQualityMode::Performance
+                            ? 0.24f
+                            : (glow->QualityMode == GlowQualityMode::Ultra ? 0.40f : 0.32f)) * modeEdgeFadeScale));
+
+                const float colorAlpha = static_cast<float>((glow->Color >> 24) & 0xFF) / 255.0f;
+                const float alphaMultiplier = DrawExecutionHelpers::Clamp01(alpha);
+                const float energyScale = (std::max)(
+                    0.0f,
+                    glow->Intensity *
+                    modeEnergyScale *
+                    qualityEnergyScale *
+                    colorAlpha *
+                    alphaMultiplier);
+                const float energyEpsilon = -std::log((std::max)(0.0001f, 1.0f - supportCutoffAlpha)) / 0.85f;
+
+                float supportRadiusPx = radiusEff * 0.50f;
+                if (energyScale > energyEpsilon && modeExponent > 0.01f) {
+                    const float ratio = (std::max)(1.0001f, (energyScale * outerWeight) / energyEpsilon);
+                    const float supportFromPower = radiusEff * std::pow(ratio, 1.0f / modeExponent) - 1.0f;
+                    const float tailRange = (std::max)(
+                        1.0f,
+                        radiusEff * (glow->Mode == GlowMode::AmbientSoft
+                            ? 3.6f
+                            : (glow->Mode == GlowMode::NeonTube ? 2.2f : 3.1f)));
+                    const float supportFromDamp = tailRange * std::log(ratio);
+                    supportRadiusPx = (std::max)(0.0f, (std::min)(supportFromPower, supportFromDamp));
+                }
+                supportRadiusPx += edgeReach;
+                const float maxSupportRadiusPx =
+                    glow->Mode == GlowMode::NeonTube
+                    ? 135.0f
+                    : (glow->Mode == GlowMode::AmbientSoft ? 190.0f : 175.0f);
+                supportRadiusPx = (std::max)(10.0f, (std::min)(maxSupportRadiusPx, supportRadiusPx));
+                const float maxEdgeFadePx =
+                    glow->Mode == GlowMode::NeonTube
+                    ? 60.0f
+                    : 100.0f;
+                const float edgeFadePx = (std::max)(
+                    baseEdgeFadePx,
+                    (std::min)(maxEdgeFadePx, supportRadiusPx * (glow->Mode == GlowMode::NeonTube ? 0.20f : 0.28f)));
+
+                const float maxEnvelopeMarginPx =
+                    glow->Mode == GlowMode::NeonTube
+                    ? 240.0f
+                    : 340.0f;
+                float envelopeMarginPx = (std::max)(
+                    28.0f,
+                    (std::min)(maxEnvelopeMarginPx, supportRadiusPx + edgeFadePx + envelopePad));
+                const float supportLimit = (std::max)(1.0f, envelopeMarginPx - edgeFadePx - 2.0f);
+                supportRadiusPx = (std::min)(supportRadiusPx, supportLimit);
+                envelopeMarginPx = (std::max)(
+                    28.0f,
+                    (std::min)(maxEnvelopeMarginPx, supportRadiusPx + edgeFadePx + envelopePad));
+
+                // gParams3 packs glow support envelope for shader-side container and cutoff masks:
+                // x=quality index, y=support radius px, z=edge fade px, w=alpha epsilon.
+                globals.Params3[0] = qualityIndex;
+                globals.Params3[1] = supportRadiusPx;
+                globals.Params3[2] = edgeFadePx;
+                globals.Params3[3] = alphaEpsilon;
+
+                globals.DrawMinMax[0] -= envelopeMarginPx;
+                globals.DrawMinMax[1] -= envelopeMarginPx;
+                globals.DrawMinMax[2] += envelopeMarginPx;
+                globals.DrawMinMax[3] += envelopeMarginPx;
             } else if (forShadow && shadow) {
                 globals.Color[0] = static_cast<float>((shadow->Color >> 0) & 0xFF) / 255.0f;
                 globals.Color[1] = static_cast<float>((shadow->Color >> 8) & 0xFF) / 255.0f;

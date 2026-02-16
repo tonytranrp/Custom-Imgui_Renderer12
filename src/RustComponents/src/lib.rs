@@ -179,13 +179,15 @@ fn decode_media(bytes: &[u8]) -> Result<FetchMediaResult, String> {
 
 // Fetch URL Data
 #[no_mangle]
-pub extern "C" fn fetch_url_data(url: *const c_char, out_len: *mut usize) -> *mut u8 {
+/// # Safety
+/// `url` must be a valid null-terminated C string pointer. `out_len` may be null;
+/// if non-null it must point to writable memory for one `usize`.
+pub unsafe extern "C" fn fetch_url_data(url: *const c_char, out_len: *mut usize) -> *mut u8 {
     if url.is_null() {
         return std::ptr::null_mut();
     }
 
-    // SAFETY: `url` is validated as non-null above and expected to be a valid C string.
-    let c_str = unsafe { CStr::from_ptr(url) };
+    let c_str = CStr::from_ptr(url);
     let url_str = match c_str.to_str() {
         Ok(s) => s,
         Err(_) => return std::ptr::null_mut(),
@@ -196,11 +198,8 @@ pub extern "C" fn fetch_url_data(url: *const c_char, out_len: *mut usize) -> *mu
             let mut reader = response.into_reader();
             let mut bytes = Vec::new();
             if std::io::copy(&mut reader, &mut bytes).is_ok() {
-                // SAFETY: `out_len` is optional and only written when non-null.
-                unsafe {
-                    if !out_len.is_null() {
-                        *out_len = bytes.len();
-                    }
+                if !out_len.is_null() {
+                    *out_len = bytes.len();
                 }
 
                 let mut boxed_slice = bytes.into_boxed_slice();
@@ -216,25 +215,26 @@ pub extern "C" fn fetch_url_data(url: *const c_char, out_len: *mut usize) -> *mu
 }
 
 #[no_mangle]
-pub extern "C" fn free_rust_bytes(ptr: *mut u8, len: usize) {
+/// # Safety
+/// `ptr`/`len` must be returned from `fetch_url_data` in this crate and not
+/// already freed.
+pub unsafe extern "C" fn free_rust_bytes(ptr: *mut u8, len: usize) {
     if ptr.is_null() {
         return;
     }
-    // SAFETY: `ptr`/`len` must come from `fetch_url_data` allocation contract.
-    unsafe {
-        let slice_ptr = std::ptr::slice_from_raw_parts_mut(ptr, len);
-        let _ = Box::from_raw(slice_ptr);
-    }
+    let slice_ptr = std::ptr::slice_from_raw_parts_mut(ptr, len);
+    let _ = Box::from_raw(slice_ptr);
 }
 
 #[no_mangle]
-pub extern "C" fn start_fetch_media(source: *const c_char, source_kind: i32) -> u64 {
+/// # Safety
+/// `source` must be a valid null-terminated C string pointer.
+pub unsafe extern "C" fn start_fetch_media(source: *const c_char, source_kind: i32) -> u64 {
     if source.is_null() {
         return 0;
     }
 
-    // SAFETY: `source` is validated as non-null above and expected to be valid UTF-8 C string.
-    let c_str = unsafe { CStr::from_ptr(source) };
+    let c_str = CStr::from_ptr(source);
     let source_str = match c_str.to_str() {
         Ok(s) => s.to_string(),
         Err(_) => return 0,
@@ -259,12 +259,17 @@ pub extern "C" fn start_fetch_media(source: *const c_char, source_kind: i32) -> 
 }
 
 #[no_mangle]
-pub extern "C" fn start_fetch_image(url: *const c_char) -> u64 {
+/// # Safety
+/// `url` must be a valid null-terminated C string pointer.
+pub unsafe extern "C" fn start_fetch_image(url: *const c_char) -> u64 {
     start_fetch_media(url, SourceKind::Url as i32)
 }
 
 #[no_mangle]
-pub extern "C" fn check_fetch_media_status_ex(
+/// # Safety
+/// All output pointers are optional but, when non-null, must point to writable
+/// memory for their corresponding types.
+pub unsafe extern "C" fn check_fetch_media_status_ex(
     id: u64,
     out_media_kind: *mut i32,
     out_data: *mut *mut u8,
@@ -274,29 +279,26 @@ pub extern "C" fn check_fetch_media_status_ex(
     out_frames: *mut *mut AnimatedFrameFFI,
     out_frame_count: *mut usize,
 ) -> i32 {
-    // SAFETY: Output pointers are optional and each is checked for null before write.
-    unsafe {
-        if !out_media_kind.is_null() {
-            *out_media_kind = MediaKind::StaticRgba as i32;
-        }
-        if !out_data.is_null() {
-            *out_data = std::ptr::null_mut();
-        }
-        if !out_len.is_null() {
-            *out_len = 0;
-        }
-        if !out_width.is_null() {
-            *out_width = 0;
-        }
-        if !out_height.is_null() {
-            *out_height = 0;
-        }
-        if !out_frames.is_null() {
-            *out_frames = std::ptr::null_mut();
-        }
-        if !out_frame_count.is_null() {
-            *out_frame_count = 0;
-        }
+    if !out_media_kind.is_null() {
+        *out_media_kind = MediaKind::StaticRgba as i32;
+    }
+    if !out_data.is_null() {
+        *out_data = std::ptr::null_mut();
+    }
+    if !out_len.is_null() {
+        *out_len = 0;
+    }
+    if !out_width.is_null() {
+        *out_width = 0;
+    }
+    if !out_height.is_null() {
+        *out_height = 0;
+    }
+    if !out_frames.is_null() {
+        *out_frames = std::ptr::null_mut();
+    }
+    if !out_frame_count.is_null() {
+        *out_frame_count = 0;
     }
 
     let state_arc = {
@@ -334,23 +336,20 @@ pub extern "C" fn check_fetch_media_status_ex(
                     let ptr = boxed_slice.as_mut_ptr();
                     std::mem::forget(boxed_slice);
 
-                    // SAFETY: Output pointers are optional and checked before write.
-                    unsafe {
-                        if !out_media_kind.is_null() {
-                            *out_media_kind = MediaKind::StaticRgba as i32;
-                        }
-                        if !out_data.is_null() {
-                            *out_data = ptr;
-                        }
-                        if !out_len.is_null() {
-                            *out_len = len;
-                        }
-                        if !out_width.is_null() {
-                            *out_width = width;
-                        }
-                        if !out_height.is_null() {
-                            *out_height = height;
-                        }
+                    if !out_media_kind.is_null() {
+                        *out_media_kind = MediaKind::StaticRgba as i32;
+                    }
+                    if !out_data.is_null() {
+                        *out_data = ptr;
+                    }
+                    if !out_len.is_null() {
+                        *out_len = len;
+                    }
+                    if !out_width.is_null() {
+                        *out_width = width;
+                    }
+                    if !out_height.is_null() {
+                        *out_height = height;
                     }
 
                     FetchStatusCode::Ready as i32
@@ -381,17 +380,14 @@ pub extern "C" fn check_fetch_media_status_ex(
                     let frame_ptr = boxed_frames.as_mut_ptr();
                     std::mem::forget(boxed_frames);
 
-                    // SAFETY: Output pointers are optional and checked before write.
-                    unsafe {
-                        if !out_media_kind.is_null() {
-                            *out_media_kind = MediaKind::AnimatedRgba as i32;
-                        }
-                        if !out_frames.is_null() {
-                            *out_frames = frame_ptr;
-                        }
-                        if !out_frame_count.is_null() {
-                            *out_frame_count = frame_count;
-                        }
+                    if !out_media_kind.is_null() {
+                        *out_media_kind = MediaKind::AnimatedRgba as i32;
+                    }
+                    if !out_frames.is_null() {
+                        *out_frames = frame_ptr;
+                    }
+                    if !out_frame_count.is_null() {
+                        *out_frame_count = frame_count;
                     }
 
                     FetchStatusCode::Ready as i32
@@ -402,7 +398,10 @@ pub extern "C" fn check_fetch_media_status_ex(
 }
 
 #[no_mangle]
-pub extern "C" fn check_fetch_status_ex(
+/// # Safety
+/// All output pointers are optional but, when non-null, must point to writable
+/// memory for their corresponding types.
+pub unsafe extern "C" fn check_fetch_status_ex(
     id: u64,
     out_data: *mut *mut u8,
     out_len: *mut usize,
@@ -429,30 +428,24 @@ pub extern "C" fn check_fetch_status_ex(
     );
 
     if status != FetchStatusCode::Ready as i32 {
-        // SAFETY: `out_data` is optional and checked before write.
-        unsafe {
-            if !out_data.is_null() {
-                *out_data = std::ptr::null_mut();
-            }
+        if !out_data.is_null() {
+            *out_data = std::ptr::null_mut();
         }
         return status;
     }
 
     if media_kind == MediaKind::StaticRgba as i32 {
-        // SAFETY: Output pointers are optional and checked before write.
-        unsafe {
-            if !out_data.is_null() {
-                *out_data = static_data;
-            }
-            if !out_len.is_null() {
-                *out_len = static_len;
-            }
-            if !out_width.is_null() {
-                *out_width = static_width;
-            }
-            if !out_height.is_null() {
-                *out_height = static_height;
-            }
+        if !out_data.is_null() {
+            *out_data = static_data;
+        }
+        if !out_len.is_null() {
+            *out_len = static_len;
+        }
+        if !out_width.is_null() {
+            *out_width = static_width;
+        }
+        if !out_height.is_null() {
+            *out_height = static_height;
         }
         return FetchStatusCode::Ready as i32;
     }
@@ -461,41 +454,41 @@ pub extern "C" fn check_fetch_status_ex(
         return FetchStatusCode::Failed as i32;
     }
 
-    // SAFETY: `frames_ptr`/`frame_count` originate from `check_fetch_media_status_ex` allocation path.
-    unsafe {
-        let boxed_frames =
-            Box::from_raw(std::ptr::slice_from_raw_parts_mut(frames_ptr, frame_count));
-        let mut frames = boxed_frames.into_vec();
-        if frames.is_empty() {
-            return FetchStatusCode::Failed as i32;
-        }
+    let boxed_frames =
+        Box::from_raw(std::ptr::slice_from_raw_parts_mut(frames_ptr, frame_count));
+    let mut frames = boxed_frames.into_vec();
+    if frames.is_empty() {
+        return FetchStatusCode::Failed as i32;
+    }
 
-        let first = frames.remove(0);
-        for frame in frames {
-            if !frame.data.is_null() && frame.len > 0 {
-                let _ = Vec::from_raw_parts(frame.data, frame.len, frame.len);
-            }
+    let first = frames.remove(0);
+    for frame in frames {
+        if !frame.data.is_null() && frame.len > 0 {
+            let _ = Vec::from_raw_parts(frame.data, frame.len, frame.len);
         }
+    }
 
-        if !out_data.is_null() {
-            *out_data = first.data;
-        }
-        if !out_len.is_null() {
-            *out_len = first.len;
-        }
-        if !out_width.is_null() {
-            *out_width = first.width;
-        }
-        if !out_height.is_null() {
-            *out_height = first.height;
-        }
+    if !out_data.is_null() {
+        *out_data = first.data;
+    }
+    if !out_len.is_null() {
+        *out_len = first.len;
+    }
+    if !out_width.is_null() {
+        *out_width = first.width;
+    }
+    if !out_height.is_null() {
+        *out_height = first.height;
     }
 
     FetchStatusCode::Ready as i32
 }
 
 #[no_mangle]
-pub extern "C" fn check_fetch_status(
+/// # Safety
+/// All output pointers are optional but, when non-null, must point to writable
+/// memory for their corresponding types.
+pub unsafe extern "C" fn check_fetch_status(
     id: u64,
     out_len: *mut usize,
     out_width: *mut i32,
@@ -511,33 +504,33 @@ pub extern "C" fn check_fetch_status(
 }
 
 #[no_mangle]
-pub extern "C" fn free_image_data(ptr: *mut u8, len: usize) {
+/// # Safety
+/// `ptr`/`len` must be returned from this crate's image fetch APIs and not
+/// already freed.
+pub unsafe extern "C" fn free_image_data(ptr: *mut u8, len: usize) {
     if ptr.is_null() {
         return;
     }
-    // SAFETY: `ptr`/`len` must come from this crate's image allocation APIs.
-    unsafe {
-        let _ = Vec::from_raw_parts(ptr, len, len);
-    }
+    let _ = Vec::from_raw_parts(ptr, len, len);
 }
 
 #[no_mangle]
-pub extern "C" fn free_animation_frames(frames: *mut AnimatedFrameFFI, frame_count: usize) {
+/// # Safety
+/// `frames`/`frame_count` must be returned from `check_fetch_media_status_ex`
+/// and not already freed.
+pub unsafe extern "C" fn free_animation_frames(frames: *mut AnimatedFrameFFI, frame_count: usize) {
     if frames.is_null() || frame_count == 0 {
         return;
     }
 
-    // SAFETY: `frames`/`frame_count` must come from `check_fetch_media_status_ex`.
-    unsafe {
-        let slice = std::slice::from_raw_parts_mut(frames, frame_count);
-        for frame in slice.iter_mut() {
-            if !frame.data.is_null() && frame.len > 0 {
-                let _ = Vec::from_raw_parts(frame.data, frame.len, frame.len);
-                frame.data = std::ptr::null_mut();
-                frame.len = 0;
-            }
+    let slice = std::slice::from_raw_parts_mut(frames, frame_count);
+    for frame in slice.iter_mut() {
+        if !frame.data.is_null() && frame.len > 0 {
+            let _ = Vec::from_raw_parts(frame.data, frame.len, frame.len);
+            frame.data = std::ptr::null_mut();
+            frame.len = 0;
         }
-
-        let _ = Box::from_raw(std::ptr::slice_from_raw_parts_mut(frames, frame_count));
     }
+
+    let _ = Box::from_raw(std::ptr::slice_from_raw_parts_mut(frames, frame_count));
 }

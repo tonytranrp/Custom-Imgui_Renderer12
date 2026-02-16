@@ -216,6 +216,14 @@ Shipped default embedded shader keys:
 - `glow.default`
 - `shadow.default`
 
+Glow clipping behavior:
+- `GlowComponent` now defaults to non-parent-clipped spill (`ClipToParent = false`) for natural bloom tails.
+- Use `SetClipToParent(true)` when strict parent-bound clipping is required.
+
+Glow shader behavior:
+- `glow.default` uses an expanded invisible draw envelope (`gDrawMinMax`) with pre-edge fade-out to avoid rectangular plate artifacts.
+- `GlowComponent` shader packing uses `Params3 = (qualityIndex, supportRadiusPx, edgeFadePx, alphaEpsilon)`.
+
 ## Media / Image Loader Usage
 
 Header:
@@ -331,4 +339,3 @@ cargo check --manifest-path src/RustComponents/Cargo.toml
 ## License
 
 See `LICENSE`.
-

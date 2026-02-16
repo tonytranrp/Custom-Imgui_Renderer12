@@ -323,6 +323,38 @@ namespace RenderUtils {
                 }
 
                 if (registry.any_of<CollisionComponent>(entity)) {
+                    const auto& selfCollision = registry.get<CollisionComponent>(entity);
+                    if (!selfCollision.Collides) {
+                        transform.Position = newPos;
+                        if (registry.any_of<ParentComponent>(entity)) {
+                            auto& parentComp = registry.get<ParentComponent>(entity);
+                            if (registry.valid(parentComp.ParentEntity) && registry.all_of<TransformComponent>(parentComp.ParentEntity)) {
+                                const auto& parentTransform = registry.get<TransformComponent>(parentComp.ParentEntity);
+                                parentComp.RelativeOffset = ImVec2(
+                                    transform.Position.x - parentTransform.Position.x,
+                                    transform.Position.y - parentTransform.Position.y
+                                );
+                            }
+                        }
+                        continue;
+                    }
+
+                    if (registry.any_of<StyleComponent>(entity) &&
+                        !registry.get<StyleComponent>(entity).CalculatedVisible) {
+                        transform.Position = newPos;
+                        if (registry.any_of<ParentComponent>(entity)) {
+                            auto& parentComp = registry.get<ParentComponent>(entity);
+                            if (registry.valid(parentComp.ParentEntity) && registry.all_of<TransformComponent>(parentComp.ParentEntity)) {
+                                const auto& parentTransform = registry.get<TransformComponent>(parentComp.ParentEntity);
+                                parentComp.RelativeOffset = ImVec2(
+                                    transform.Position.x - parentTransform.Position.x,
+                                    transform.Position.y - parentTransform.Position.y
+                                );
+                            }
+                        }
+                        continue;
+                    }
+
                     const ImVec2 oldPos = transform.Position;
 
                     std::vector<ImVec4> myRects;
@@ -353,6 +385,15 @@ namespace RenderUtils {
                     auto collisionView = registry.view<TransformComponent, CollisionComponent>();
                     for (auto other : collisionView) {
                         if (other == entity) {
+                            continue;
+                        }
+
+                        const auto& otherCollision = collisionView.get<CollisionComponent>(other);
+                        if (!otherCollision.Collides) {
+                            continue;
+                        }
+                        if (registry.any_of<StyleComponent>(other) &&
+                            !registry.get<StyleComponent>(other).CalculatedVisible) {
                             continue;
                         }
 
