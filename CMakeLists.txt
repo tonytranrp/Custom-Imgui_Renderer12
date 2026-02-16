@@ -112,6 +112,8 @@ add_executable(ImGuiDX12App
     src/Render/ImguiRender.hpp
     src/Render/RenderUtils/UIRenderer.cpp
     src/Render/RenderUtils/UIRenderer.hpp
+    src/Render/RenderUtils/ShaderSystem.cpp
+    src/Render/RenderUtils/ShaderSystem.hpp
     src/Render/RenderUtils/UIComponents.hpp
 )
 
@@ -131,3 +133,19 @@ target_link_libraries(ImGuiDX12App PRIVATE
 )
 
 target_include_directories(ImGuiDX12App PRIVATE src)
+
+add_custom_command(TARGET ImGuiDX12App POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:ImGuiDX12App>/assets/shaders"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${CMAKE_SOURCE_DIR}/assets/shaders/ui_shader_shared.hlsli"
+        "$<TARGET_FILE_DIR:ImGuiDX12App>/assets/shaders/ui_shader_shared.hlsli"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${CMAKE_SOURCE_DIR}/assets/shaders/ui_default_vs.hlsl"
+        "$<TARGET_FILE_DIR:ImGuiDX12App>/assets/shaders/ui_default_vs.hlsl"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${CMAKE_SOURCE_DIR}/assets/shaders/glow_default.hlsl"
+        "$<TARGET_FILE_DIR:ImGuiDX12App>/assets/shaders/glow_default.hlsl"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${CMAKE_SOURCE_DIR}/assets/shaders/shadow_default.hlsl"
+        "$<TARGET_FILE_DIR:ImGuiDX12App>/assets/shaders/shadow_default.hlsl"
+)

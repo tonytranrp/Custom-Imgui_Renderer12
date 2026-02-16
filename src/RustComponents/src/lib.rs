@@ -5,6 +5,7 @@ use std::os::raw::c_char;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
+use std::time::Duration;
 
 use image::codecs::gif::GifDecoder;
 use image::{AnimationDecoder, ImageFormat};
@@ -90,7 +91,14 @@ fn load_source_bytes(source: &str, source_kind: i32) -> Result<Vec<u8>, String> 
     }
 
     if source_kind == SourceKind::Url as i32 {
-        let response = ureq::get(source)
+        let agent = ureq::AgentBuilder::new()
+            .timeout_connect(Duration::from_secs(5))
+            .timeout_read(Duration::from_secs(20))
+            .timeout_write(Duration::from_secs(20))
+            .build();
+
+        let response = agent
+            .get(source)
             .call()
             .map_err(|e| format!("network error: {e}"))?;
         let mut reader = response.into_reader();
@@ -106,6 +114,14 @@ fn load_source_bytes(source: &str, source_kind: i32) -> Result<Vec<u8>, String> 
     }
 
     Err("invalid source kind".to_string())
+}
+
+#[no_mangle]
+pub extern "C" fn cancel_fetch_request(id: u64) {
+    if id == 0 {
+        return;
+    }
+    PENDING_REQUESTS.lock().unwrap().remove(&id);
 }
 
 fn decode_media(bytes: &[u8]) -> Result<FetchMediaResult, String> {

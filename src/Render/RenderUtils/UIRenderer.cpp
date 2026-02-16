@@ -1,11 +1,14 @@
 #include "UIRenderer.hpp"
 #include "Dx12Init/Dx12Init.hpp"
 #include "Components/ImageLoaderComponent.hpp" // Added for ImageLoader
+#include "ShaderSystem.hpp"
 #include <unordered_map>
 #include <string>
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <array>
+#include <vector>
 
 
 // UIComponents.hpp is already included in UIRenderer.hpp, which now includes the sub-files.
@@ -43,6 +46,29 @@ namespace RenderUtils {
         inline bool IsEntityVisible(entt::registry& registry, entt::entity entity) {
             const auto* style = registry.try_get<StyleComponent>(entity);
             return !style || style->CalculatedVisible;
+        }
+
+        inline float Clamp01(float value) {
+            if (!std::isfinite(value)) {
+                return 0.0f;
+            }
+            if (value < 0.0f) {
+                return 0.0f;
+            }
+            if (value > 1.0f) {
+                return 1.0f;
+            }
+            return value;
+        }
+
+        inline ImU32 ScaleColorAlpha(ImU32 color, float alphaMultiplier) {
+            const float clampedMultiplier = Clamp01(alphaMultiplier);
+            const int r = (color >> 0) & 0xFF;
+            const int g = (color >> 8) & 0xFF;
+            const int b = (color >> 16) & 0xFF;
+            const int a = (color >> 24) & 0xFF;
+            const int scaledAlpha = static_cast<int>(static_cast<float>(a) * clampedMultiplier);
+            return IM_COL32(r, g, b, scaledAlpha);
         }
 
         inline std::vector<entt::entity> SortCustomEntities(entt::registry& registry, bool requireInput) {
@@ -269,16 +295,64 @@ namespace RenderUtils {
                 if (ImGui::CollapsingHeader("Glow", ImGuiTreeNodeFlags_DefaultOpen)) {
                     auto& glow = registry.get<GlowComponent>(s_SelectedEntity);
                     ImGui::Checkbox("Enabled", &glow.Enabled);
-                    ImGui::DragFloat("Radius", &glow.Radius, 1.0f, 0.0f, 100.0f);
-                    ImGui::DragFloat("Intensity", &glow.Intensity, 0.01f, 0.0f, 5.0f);
-                    ImGui::DragInt("Samples", &glow.Samples, 1, 1, 32);
-                    ImGui::Checkbox("Cache Enabled", &glow.CacheEnabled);
-                    ImGui::DragInt("Max Samples", &glow.MaxSamples, 1, 1, 64);
+                    int renderMode = static_cast<int>(glow.RenderMode);
+                    const char* renderModes[] = { "CPU", "Shader" };
+                    if (ImGui::Combo("Render Mode##Glow", &renderMode, renderModes, 2)) {
+                        glow.RenderMode = static_cast<GlowRenderMode>(renderMode);
+                    }
+                    std::array<char, 128> glowShaderKey{};
+                    std::strncpy(glowShaderKey.data(), glow.ShaderKey.c_str(), glowShaderKey.size() - 1);
+                    if (ImGui::InputText("Shader Key##Glow", glowShaderKey.data(), glowShaderKey.size())) {
+                        glow.ShaderKey = glowShaderKey.data();
+                    }
+                    if (ImGui::DragFloat("Radius", &glow.Radius, 1.0f, 0.0f, 100.0f)) {
+                        glow.MarkCacheDirty();
+                    }
+                    if (ImGui::DragFloat("Intensity", &glow.Intensity, 0.01f, 0.0f, 8.0f)) {
+                        glow.MarkCacheDirty();
+                    }
+                    if (ImGui::DragInt("Samples", &glow.Samples, 1, 1, 64)) {
+                        glow.MarkCacheDirty();
+                    }
+                    if (ImGui::Checkbox("Cache Enabled", &glow.CacheEnabled)) {
+                        glow.MarkCacheDirty();
+                    }
+                    if (ImGui::DragInt("Max Samples", &glow.MaxSamples, 1, 1, 96)) {
+                        glow.MarkCacheDirty();
+                    }
+
+                    int mode = static_cast<int>(glow.Mode);
+                    const char* modes[] = { "Gaussian Bloom", "Neon Tube", "Ambient Soft" };
+                    if (ImGui::Combo("Mode", &mode, modes, 3)) {
+                        glow.Mode = static_cast<GlowMode>(mode);
+                        glow.MarkCacheDirty();
+                    }
+                    int quality = static_cast<int>(glow.QualityMode);
+                    const char* qualityModes[] = { "Performance", "Balanced", "Ultra" };
+                    if (ImGui::Combo("Quality", &quality, qualityModes, 3)) {
+                        glow.QualityMode = static_cast<GlowQualityMode>(quality);
+                        glow.MarkCacheDirty();
+                    }
+                    if (ImGui::DragFloat("Falloff", &glow.Falloff, 0.01f, 0.2f, 4.0f)) {
+                        glow.MarkCacheDirty();
+                    }
+                    if (ImGui::DragFloat("Core Strength", &glow.CoreStrength, 0.01f, 0.0f, 2.0f)) {
+                        glow.MarkCacheDirty();
+                    }
+                    if (ImGui::Checkbox("Inner Glow", &glow.InnerGlow)) {
+                        glow.MarkCacheDirty();
+                    }
+                    if (ImGui::Checkbox("Outer Only", &glow.OuterOnly)) {
+                        glow.MarkCacheDirty();
+                    }
+                    if (ImGui::DragFloat("Radius Scale", &glow.RadiusScale, 0.01f, 0.1f, 3.0f)) {
+                        glow.MarkCacheDirty();
+                    }
                     
                     ImVec4 gCol = ImColor(glow.Color);
                     if (ImGui::ColorEdit4("Glow Color", (float*)&gCol)) {
                         glow.Color = ImColor(gCol);
-                        glow.CacheDirty = true;
+                        glow.MarkCacheDirty();
                     }
                 }
             }
@@ -287,6 +361,16 @@ namespace RenderUtils {
                 if (ImGui::CollapsingHeader("Shadow", ImGuiTreeNodeFlags_DefaultOpen)) {
                     auto& shadow = registry.get<ShadowComponent>(s_SelectedEntity);
                     ImGui::Checkbox("Enabled##shadow", &shadow.Enabled);
+                    int renderMode = static_cast<int>(shadow.RenderMode);
+                    const char* renderModes[] = { "CPU", "Shader" };
+                    if (ImGui::Combo("Render Mode##Shadow", &renderMode, renderModes, 2)) {
+                        shadow.RenderMode = static_cast<ShadowRenderMode>(renderMode);
+                    }
+                    std::array<char, 128> shadowShaderKey{};
+                    std::strncpy(shadowShaderKey.data(), shadow.ShaderKey.c_str(), shadowShaderKey.size() - 1);
+                    if (ImGui::InputText("Shader Key##Shadow", shadowShaderKey.data(), shadowShaderKey.size())) {
+                        shadow.ShaderKey = shadowShaderKey.data();
+                    }
                     ImVec4 shadowCol = ImColor(shadow.Color);
                     if (ImGui::ColorEdit4("Shadow Color", (float*)&shadowCol)) {
                         shadow.Color = ImColor(shadowCol);
@@ -296,6 +380,222 @@ namespace RenderUtils {
                     ImGui::DragFloat("Spread", &shadow.Spread, 0.5f, -50.0f, 50.0f);
                     ImGui::DragInt("Shadow Samples", &shadow.Samples, 1, 1, 48);
                     ImGui::Checkbox("Inset", &shadow.Inset);
+                }
+            }
+
+            if (registry.all_of<ShaderComponent>(s_SelectedEntity)) {
+                if (ImGui::CollapsingHeader("Shader", ImGuiTreeNodeFlags_DefaultOpen)) {
+                    auto& shader = registry.get<ShaderComponent>(s_SelectedEntity);
+                    ImGui::Checkbox("Enabled##shader", &shader.Enabled);
+
+                    int backend = static_cast<int>(shader.Backend);
+                    const char* backendModes[] = { "AutoPreferDXC", "D3DCompileOnly", "DXCOnly" };
+                    if (ImGui::Combo("Backend", &backend, backendModes, 3)) {
+                        shader.Backend = static_cast<ShaderBackendMode>(backend);
+                        shader.Dirty = true;
+                    }
+
+                    int policy = static_cast<int>(shader.CompilePolicy);
+                    const char* compilePolicies[] = { "OnDemand+Cache", "Startup", "Manual Apply" };
+                    if (ImGui::Combo("Compile Policy", &policy, compilePolicies, 3)) {
+                        shader.CompilePolicy = static_cast<ShaderCompilePolicy>(policy);
+                    }
+
+                    int stage = static_cast<int>(shader.StageMode);
+                    const char* stageModes[] = { "PixelOnly", "VertexAndPixel" };
+                    if (ImGui::Combo("Stage Mode", &stage, stageModes, 2)) {
+                        shader.StageMode = static_cast<ShaderStageMode>(stage);
+                        shader.Dirty = true;
+                    }
+
+                    int sourceMode = static_cast<int>(shader.PixelSource.Mode);
+                    const char* sourceModes[] = { "EmbeddedCpp", "EmbeddedRust", "File", "Inline" };
+                    if (ImGui::Combo("Pixel Source Mode", &sourceMode, sourceModes, 4)) {
+                        shader.PixelSource.Mode = static_cast<ShaderSourceMode>(sourceMode);
+                        shader.Dirty = true;
+                    }
+                    ImGui::TextDisabled("File-only policy: Embedded* modes resolve alias keys to files.");
+                    if (shader.PixelSource.Mode == ShaderSourceMode::Inline) {
+                        ImGui::TextColored(ImVec4(1.0f, 0.72f, 0.38f, 1.0f), "Inline source is disabled by policy.");
+                    }
+
+                    std::array<char, 512> pixelSourceBuf{};
+                    std::strncpy(pixelSourceBuf.data(), shader.PixelSource.KeyOrPathOrInline.c_str(), pixelSourceBuf.size() - 1);
+                    if (ImGui::InputTextMultiline("Pixel Source/Key", pixelSourceBuf.data(), pixelSourceBuf.size(), ImVec2(430.0f, 82.0f))) {
+                        shader.PixelSource.KeyOrPathOrInline = pixelSourceBuf.data();
+                        shader.Dirty = true;
+                    }
+
+                    std::array<char, 64> pixelEntryBuf{};
+                    std::strncpy(pixelEntryBuf.data(), shader.PixelSource.EntryPoint.c_str(), pixelEntryBuf.size() - 1);
+                    if (ImGui::InputText("Pixel Entry", pixelEntryBuf.data(), pixelEntryBuf.size())) {
+                        shader.PixelSource.EntryPoint = pixelEntryBuf.data();
+                        shader.Dirty = true;
+                    }
+
+                    std::array<char, 64> pixelTargetBuf{};
+                    std::strncpy(pixelTargetBuf.data(), shader.PixelSource.TargetProfile.c_str(), pixelTargetBuf.size() - 1);
+                    if (ImGui::InputText("Pixel Target", pixelTargetBuf.data(), pixelTargetBuf.size())) {
+                        shader.PixelSource.TargetProfile = pixelTargetBuf.data();
+                        shader.Dirty = true;
+                    }
+
+                    if (shader.StageMode == ShaderStageMode::VertexAndPixel) {
+                        int vsMode = static_cast<int>(shader.VertexSource.Mode);
+                        if (ImGui::Combo("Vertex Source Mode", &vsMode, sourceModes, 4)) {
+                            shader.VertexSource.Mode = static_cast<ShaderSourceMode>(vsMode);
+                            shader.Dirty = true;
+                        }
+                        if (shader.VertexSource.Mode == ShaderSourceMode::Inline) {
+                            ImGui::TextColored(ImVec4(1.0f, 0.72f, 0.38f, 1.0f), "Inline source is disabled by policy.");
+                        }
+
+                        std::array<char, 512> vertexSourceBuf{};
+                        std::strncpy(vertexSourceBuf.data(), shader.VertexSource.KeyOrPathOrInline.c_str(), vertexSourceBuf.size() - 1);
+                        if (ImGui::InputTextMultiline("Vertex Source/Key", vertexSourceBuf.data(), vertexSourceBuf.size(), ImVec2(430.0f, 62.0f))) {
+                            shader.VertexSource.KeyOrPathOrInline = vertexSourceBuf.data();
+                            shader.Dirty = true;
+                        }
+
+                        std::array<char, 64> vertexEntryBuf{};
+                        std::strncpy(vertexEntryBuf.data(), shader.VertexSource.EntryPoint.c_str(), vertexEntryBuf.size() - 1);
+                        if (ImGui::InputText("Vertex Entry", vertexEntryBuf.data(), vertexEntryBuf.size())) {
+                            shader.VertexSource.EntryPoint = vertexEntryBuf.data();
+                            shader.Dirty = true;
+                        }
+
+                        std::array<char, 64> vertexTargetBuf{};
+                        std::strncpy(vertexTargetBuf.data(), shader.VertexSource.TargetProfile.c_str(), vertexTargetBuf.size() - 1);
+                        if (ImGui::InputText("Vertex Target", vertexTargetBuf.data(), vertexTargetBuf.size())) {
+                            shader.VertexSource.TargetProfile = vertexTargetBuf.data();
+                            shader.Dirty = true;
+                        }
+                    }
+
+                    ImGui::SeparatorText("Parameters");
+                    int removeParamIndex = -1;
+                    for (size_t i = 0; i < shader.Parameters.size(); ++i) {
+                        ImGui::PushID(static_cast<int>(i));
+                        auto& param = shader.Parameters[i];
+
+                        std::array<char, 96> paramName{};
+                        std::strncpy(paramName.data(), param.Name.c_str(), paramName.size() - 1);
+                        if (ImGui::InputText("Name", paramName.data(), paramName.size())) {
+                            param.Name = paramName.data();
+                            shader.Dirty = true;
+                        }
+
+                        int paramType = static_cast<int>(param.Type);
+                        const char* paramTypes[] = { "Float", "Int", "Vec2", "Vec3", "Vec4", "Color", "Bool" };
+                        if (ImGui::Combo("Type", &paramType, paramTypes, 7)) {
+                            param.Type = static_cast<ShaderParamType>(paramType);
+                            switch (param.Type) {
+                            case ShaderParamType::Float: param.Value = 0.0f; break;
+                            case ShaderParamType::Int: param.Value = 0; break;
+                            case ShaderParamType::Vec2: param.Value = ImVec2(0.0f, 0.0f); break;
+                            case ShaderParamType::Vec3: param.Value = ImVec4(0.0f, 0.0f, 0.0f, 0.0f); break;
+                            case ShaderParamType::Vec4: param.Value = ImVec4(0.0f, 0.0f, 0.0f, 0.0f); break;
+                            case ShaderParamType::Color: param.Value = IM_COL32(255, 255, 255, 255); break;
+                            case ShaderParamType::Bool: param.Value = false; break;
+                            }
+                            shader.Dirty = true;
+                        }
+
+                        switch (param.Type) {
+                        case ShaderParamType::Float: {
+                            float value = std::holds_alternative<float>(param.Value) ? std::get<float>(param.Value) : 0.0f;
+                            if (ImGui::DragFloat("Value", &value, 0.01f)) {
+                                param.Value = value;
+                                shader.Dirty = true;
+                            }
+                            break;
+                        }
+                        case ShaderParamType::Int: {
+                            int value = std::holds_alternative<int>(param.Value) ? std::get<int>(param.Value) : 0;
+                            if (ImGui::DragInt("Value", &value, 1.0f)) {
+                                param.Value = value;
+                                shader.Dirty = true;
+                            }
+                            break;
+                        }
+                        case ShaderParamType::Vec2: {
+                            ImVec2 value = std::holds_alternative<ImVec2>(param.Value) ? std::get<ImVec2>(param.Value) : ImVec2(0.0f, 0.0f);
+                            if (ImGui::DragFloat2("Value", &value.x, 0.01f)) {
+                                param.Value = value;
+                                shader.Dirty = true;
+                            }
+                            break;
+                        }
+                        case ShaderParamType::Vec3: {
+                            ImVec4 value = std::holds_alternative<ImVec4>(param.Value) ? std::get<ImVec4>(param.Value) : ImVec4(0.0f, 0.0f, 0.0f, 0.0f);
+                            float v3[3] = { value.x, value.y, value.z };
+                            if (ImGui::DragFloat3("Value", v3, 0.01f)) {
+                                param.Value = ImVec4(v3[0], v3[1], v3[2], 0.0f);
+                                shader.Dirty = true;
+                            }
+                            break;
+                        }
+                        case ShaderParamType::Vec4: {
+                            ImVec4 value = std::holds_alternative<ImVec4>(param.Value) ? std::get<ImVec4>(param.Value) : ImVec4(0.0f, 0.0f, 0.0f, 0.0f);
+                            if (ImGui::DragFloat4("Value", &value.x, 0.01f)) {
+                                param.Value = value;
+                                shader.Dirty = true;
+                            }
+                            break;
+                        }
+                        case ShaderParamType::Color: {
+                            ImU32 value = std::holds_alternative<ImU32>(param.Value) ? std::get<ImU32>(param.Value) : IM_COL32(255, 255, 255, 255);
+                            ImVec4 color = ImColor(value);
+                            if (ImGui::ColorEdit4("Value", &color.x)) {
+                                param.Value = static_cast<ImU32>(ImColor(color));
+                                shader.Dirty = true;
+                            }
+                            break;
+                        }
+                        case ShaderParamType::Bool: {
+                            bool value = std::holds_alternative<bool>(param.Value) ? std::get<bool>(param.Value) : false;
+                            if (ImGui::Checkbox("Value", &value)) {
+                                param.Value = value;
+                                shader.Dirty = true;
+                            }
+                            break;
+                        }
+                        }
+
+                        ImGui::Checkbox("Expose In Inspector", &param.ExposedInInspector);
+                        if (ImGui::SmallButton("Remove Param")) {
+                            removeParamIndex = static_cast<int>(i);
+                        }
+                        ImGui::Separator();
+                        ImGui::PopID();
+                    }
+                    if (removeParamIndex >= 0 &&
+                        removeParamIndex < static_cast<int>(shader.Parameters.size())) {
+                        shader.Parameters.erase(shader.Parameters.begin() + removeParamIndex);
+                        shader.Dirty = true;
+                    }
+                    if (ImGui::Button("Add Parameter")) {
+                        ShaderParameter param;
+                        param.Name = "Param" + std::to_string(shader.Parameters.size());
+                        param.Type = ShaderParamType::Float;
+                        param.Value = 0.0f;
+                        shader.Parameters.push_back(std::move(param));
+                        shader.Dirty = true;
+                    }
+
+                    ImGui::Checkbox("Auto Reload Files", &shader.AutoReloadFileChanges);
+
+                    if (ImGui::Button("Apply/Recompile")) {
+                        shader.CompileRequested = true;
+                        shader.Dirty = true;
+                    }
+
+                    ImGui::Text("Compiled: %s", shader.IsCompiled ? "Yes" : "No");
+                    ImGui::Text("Program Handle: %llu", static_cast<unsigned long long>(shader.ProgramHandle));
+                    if (!shader.LastError.empty()) {
+                        ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.5f, 1.0f), "Last Error:");
+                        ImGui::TextWrapped("%s", shader.LastError.c_str());
+                    }
                 }
             }
 
@@ -333,6 +633,129 @@ namespace RenderUtils {
                     ImGui::Checkbox("Use For HitTest", &shape.UseForHitTest);
                     ImGui::DragInt("Priority##shape", &shape.Priority, 1, -100, 100);
                     ImGui::Text("Shape Count: %d", static_cast<int>(shape.Shapes.size()));
+
+                    if (ImGui::Button("Add Rect")) {
+                        shape.Shapes.emplace_back(ShapeType::Rect);
+                    }
+                    ImGui::SameLine();
+                    if (ImGui::Button("Add Circle")) {
+                        shape.Shapes.emplace_back(ShapeType::Circle);
+                    }
+                    ImGui::SameLine();
+                    if (ImGui::Button("Add Line")) {
+                        ShapePrimitive primitive(ShapeType::Line);
+                        primitive.Points = { ImVec2(0.0f, 0.0f), ImVec2(80.0f, 0.0f) };
+                        primitive.StrokeEnabled = true;
+                        shape.Shapes.push_back(std::move(primitive));
+                    }
+                    ImGui::SameLine();
+                    if (ImGui::Button("Add Triangle")) {
+                        ShapePrimitive primitive(ShapeType::Triangle);
+                        primitive.Points = { ImVec2(0.0f, 80.0f), ImVec2(40.0f, 0.0f), ImVec2(80.0f, 80.0f) };
+                        primitive.StrokeEnabled = true;
+                        shape.Shapes.push_back(std::move(primitive));
+                    }
+                    ImGui::SameLine();
+                    if (ImGui::Button("Add Polyline")) {
+                        ShapePrimitive primitive(ShapeType::Polyline);
+                        primitive.Points = { ImVec2(0.0f, 0.0f), ImVec2(40.0f, 10.0f), ImVec2(90.0f, -5.0f) };
+                        primitive.StrokeEnabled = true;
+                        shape.Shapes.push_back(std::move(primitive));
+                    }
+
+                    int removeShapeIndex = -1;
+                    int duplicateShapeIndex = -1;
+                    for (size_t i = 0; i < shape.Shapes.size(); ++i) {
+                        ImGui::PushID(static_cast<int>(i));
+                        auto& primitive = shape.Shapes[i];
+                        if (ImGui::TreeNode("Primitive", "Primitive %d", static_cast<int>(i))) {
+                            int type = static_cast<int>(primitive.Type);
+                            const char* typeNames[] = { "Rect", "Circle", "Line", "Triangle", "Polyline" };
+                            if (ImGui::Combo("Type", &type, typeNames, 5)) {
+                                primitive.Type = static_cast<ShapeType>(type);
+                                if ((primitive.Type == ShapeType::Line || primitive.Type == ShapeType::Triangle || primitive.Type == ShapeType::Polyline) &&
+                                    primitive.Points.empty()) {
+                                    primitive.Points = { ImVec2(0.0f, 0.0f), ImVec2(80.0f, 0.0f) };
+                                }
+                            }
+
+                            ImGui::Checkbox("Visible", &primitive.Visible);
+                            ImGui::DragFloat2("Offset", &primitive.Offset.x, 0.2f);
+                            ImGui::DragFloat2("Size", &primitive.Size.x, 0.2f);
+                            ImGui::DragFloat("Radius", &primitive.Radius, 0.2f, 0.0f, 2048.0f);
+                            ImGui::DragFloat("Rounding", &primitive.Rounding, 0.1f, 0.0f, 100.0f);
+                            ImGui::Checkbox("Filled", &primitive.Filled);
+                            ImGui::Checkbox("Stroke Enabled", &primitive.StrokeEnabled);
+                            ImGui::DragFloat("Stroke Thickness", &primitive.StrokeThickness, 0.1f, 0.1f, 64.0f);
+
+                            ImVec4 fill = ImColor(primitive.FillColor);
+                            ImVec4 stroke = ImColor(primitive.StrokeColor);
+                            if (ImGui::ColorEdit4("Fill Color", &fill.x)) {
+                                primitive.FillColor = ImColor(fill);
+                            }
+                            if (ImGui::ColorEdit4("Stroke Color", &stroke.x)) {
+                                primitive.StrokeColor = ImColor(stroke);
+                            }
+
+                            if (primitive.Type == ShapeType::Line || primitive.Type == ShapeType::Triangle || primitive.Type == ShapeType::Polyline) {
+                                ImGui::SeparatorText("Points");
+                                int removePointIndex = -1;
+                                for (size_t p = 0; p < primitive.Points.size(); ++p) {
+                                    ImGui::PushID(static_cast<int>(p));
+                                    ImGui::DragFloat2("Point", &primitive.Points[p].x, 0.2f);
+                                    ImGui::SameLine();
+                                    if (ImGui::SmallButton("X")) {
+                                        removePointIndex = static_cast<int>(p);
+                                    }
+                                    ImGui::PopID();
+                                }
+                                if (removePointIndex >= 0 && removePointIndex < static_cast<int>(primitive.Points.size())) {
+                                    primitive.Points.erase(primitive.Points.begin() + removePointIndex);
+                                }
+                                if (ImGui::SmallButton("Add Point")) {
+                                    primitive.Points.emplace_back(0.0f, 0.0f);
+                                }
+                            }
+
+                            if (ImGui::SmallButton("Duplicate")) {
+                                duplicateShapeIndex = static_cast<int>(i);
+                            }
+                            ImGui::SameLine();
+                            if (ImGui::SmallButton("Remove")) {
+                                removeShapeIndex = static_cast<int>(i);
+                            }
+                            ImGui::TreePop();
+                        }
+                        ImGui::PopID();
+                    }
+
+                    if (duplicateShapeIndex >= 0 && duplicateShapeIndex < static_cast<int>(shape.Shapes.size())) {
+                        shape.Shapes.push_back(shape.Shapes[static_cast<size_t>(duplicateShapeIndex)]);
+                    }
+                    if (removeShapeIndex >= 0 && removeShapeIndex < static_cast<int>(shape.Shapes.size())) {
+                        shape.Shapes.erase(shape.Shapes.begin() + removeShapeIndex);
+                    }
+                }
+            }
+
+            if (registry.all_of<Components::ImageLoader>(s_SelectedEntity)) {
+                if (ImGui::CollapsingHeader("Image Loader", ImGuiTreeNodeFlags_DefaultOpen)) {
+                    auto& loader = registry.get<Components::ImageLoader>(s_SelectedEntity);
+                    ImGui::Text("State: %s",
+                        loader.state == Components::ImageLoader::LoadState::Idle ? "Idle" :
+                        loader.state == Components::ImageLoader::LoadState::Loading ? "Loading" :
+                        loader.state == Components::ImageLoader::LoadState::Loaded ? "Loaded" : "Failed");
+                    ImGui::Text("Source: %d / %d", loader.ActiveSourceIndex + 1, static_cast<int>(loader.source_states.size()));
+                    int cycleMode = static_cast<int>(loader.CycleMode);
+                    const char* cycleModes[] = { "Loaded Only", "Cycle All", "Refetch On Click" };
+                    if (ImGui::Combo("Cycle Mode", &cycleMode, cycleModes, 3)) {
+                        loader.CycleMode = static_cast<Components::ImageLoader::SourceCycleMode>(cycleMode);
+                    }
+                    ImGui::Checkbox("Skip Failed Sources", &loader.SkipFailedSources);
+                    ImGui::Checkbox("Keep Last Successful", &loader.KeepLastSuccessfulTexture);
+                    if (!loader.LastStatusMessage.empty()) {
+                        ImGui::TextWrapped("Status: %s", loader.LastStatusMessage.c_str());
+                    }
                 }
             }
 
@@ -354,7 +777,11 @@ namespace RenderUtils {
                     ImGui::Text("Active Animations: %d", (int)anim.Animations.size());
                     for (size_t i = 0; i < anim.Animations.size(); i++) {
                         auto& a = anim.Animations[i];
-                        ImGui::ProgressBar(a.Elapsed / a.Duration, ImVec2(-1, 0), "Progress");
+                        const float denom = (a.Duration <= 0.0f) ? 1.0f : a.Duration;
+                        float t = a.Elapsed / denom;
+                        if (t < 0.0f) t = 0.0f;
+                        if (t > 1.0f) t = 1.0f;
+                        ImGui::ProgressBar(t, ImVec2(-1, 0), "Progress");
                     }
                 }
             }
@@ -445,7 +872,7 @@ namespace RenderUtils {
                              if (name && strlen(name) > 0) {
                                  bool isSelected = (da.TargetEntityName && strcmp(da.TargetEntityName, name) == 0);
                                  if (ImGui::Selectable(name, isSelected)) {
-                                     da.TargetEntityName = name; // Warning: Assumes Name points to static/persistent string
+                                     da.TargetEntityName = name; // Name lifetime is owned by ContainerComponent.
                                  }
                                  if (isSelected) ImGui::SetItemDefaultFocus();
                              }
@@ -591,12 +1018,14 @@ namespace RenderUtils {
         }
 
         // 3. Behavior-critical update order:
-        // UpdateAnimations -> ResolveTransforms -> ResolveDepth -> UpdateInput -> UpdateText -> UpdateImageLoader
+        // UpdateAnimations -> CustomUpdate -> ResolveTransforms -> ResolveDepth -> UpdateInput -> OptionsUpdate -> ShaderUpdate -> CustomInput -> UpdateText -> UpdateImageLoader
         UpdateAnimations(registry, deltaTime);
         InvokeCustomUpdateCallbacks(registry, deltaTime);
         ResolveTransforms(registry);
         ResolveDepth(registry);
         UpdateInput(registry);
+        OptionsSystem::Update(registry);
+        ShaderSystem::UpdateCompile(registry);
         InvokeCustomInputCallbacks(registry);
         UpdateText(registry);
         UpdateImageLoader(registry);
@@ -760,6 +1189,7 @@ namespace RenderUtils {
 
     void UIRenderer::Render(entt::registry& registry) {
         ImDrawList* draw_list = ImGui::GetBackgroundDrawList();
+        ShaderSystem::ClearQueue();
         
         // 1. Sort Entities by ZIndex
         registry.sort<StyleComponent>([](const auto& lhs, const auto& rhs) {
@@ -785,24 +1215,15 @@ namespace RenderUtils {
             ImU32 gradientTopColor = style.GradientTopColor;
             ImU32 gradientBottomColor = style.GradientBottomColor;
             ImU32 outlineColor = style.OutlineColor;
+            float entityAlpha = 1.0f;
             
             if (registry.any_of<TransparencyComponent>(entity)) {
-                float alpha = registry.get<TransparencyComponent>(entity).Alpha;
-                if (alpha < 1.0f) {
-                    auto ApplyAlpha = [](ImU32 col, float a) -> ImU32 {
-                        int r = (col >> 0) & 0xFF;
-                        int g = (col >> 8) & 0xFF;
-                        int b = (col >> 16) & 0xFF;
-                        int original_a = (col >> 24) & 0xFF;
-                        int new_a = static_cast<int>(original_a * a);
-                        return IM_COL32(r, g, b, new_a);
-                    };
-                    bgColor = ApplyAlpha(bgColor, alpha);
-                    borderColor = ApplyAlpha(borderColor, alpha);
-                    gradientTopColor = ApplyAlpha(gradientTopColor, alpha);
-                    gradientBottomColor = ApplyAlpha(gradientBottomColor, alpha);
-                    outlineColor = ApplyAlpha(outlineColor, alpha);
-                }
+                entityAlpha = Clamp01(registry.get<TransparencyComponent>(entity).Alpha);
+                bgColor = ScaleColorAlpha(bgColor, entityAlpha);
+                borderColor = ScaleColorAlpha(borderColor, entityAlpha);
+                gradientTopColor = ScaleColorAlpha(gradientTopColor, entityAlpha);
+                gradientBottomColor = ScaleColorAlpha(gradientBottomColor, entityAlpha);
+                outlineColor = ScaleColorAlpha(outlineColor, entityAlpha);
             }
 
             // Handle Parent Clipping (Recursive Clip would be better, but immediate parent is enough for now)
@@ -837,39 +1258,141 @@ namespace RenderUtils {
             // --- Render Shadow ---
             if (registry.any_of<ShadowComponent>(entity)) {
                 const auto& shadow = registry.get<ShadowComponent>(entity);
-                ShadowSystem::Draw(shadow, draw_list, p_min, p_max, style.Rounding, style.RoundingFlags);
+                bool queuedShadow = false;
+                if (shadow.RenderMode == ShadowRenderMode::Shader) {
+                    queuedShadow = ShaderSystem::TryQueueEntityImGui(
+                        registry,
+                        entity,
+                        draw_list,
+                        p_min,
+                        p_max,
+                        style.ZIndexInt,
+                        entityAlpha,
+                        false,
+                        true);
+                }
+                if (!queuedShadow) {
+                    ShadowSystem::Draw(shadow, draw_list, p_min, p_max, style.Rounding, style.RoundingFlags, entityAlpha);
+                }
             }
 
             // --- Render Glow ---
             if (registry.any_of<GlowComponent>(entity)) {
                 const auto& glow = registry.get<GlowComponent>(entity);
-                if (glow.Enabled && glow.Intensity > 0.0f) {
-                    const float r = static_cast<float>((glow.Color >> 0) & 0xFF);
-                    const float g = static_cast<float>((glow.Color >> 8) & 0xFF);
-                    const float b = static_cast<float>((glow.Color >> 16) & 0xFF);
-                    const float a = static_cast<float>((glow.Color >> 24) & 0xFF);
-                    const int sampleCount = glow.GetEffectiveSampleCount();
-                    const auto& alphaWeights = glow.GetAlphaFactors();
+                bool queuedGlow = false;
+                if (glow.RenderMode == GlowRenderMode::Shader) {
+                    queuedGlow = ShaderSystem::TryQueueEntityImGui(
+                        registry,
+                        entity,
+                        draw_list,
+                        p_min,
+                        p_max,
+                        style.ZIndexInt,
+                        entityAlpha,
+                        true,
+                        false);
+                }
 
-                    float stepAlpha = (a * glow.Intensity) / static_cast<float>(sampleCount);
-                    if (stepAlpha > 255.0f) {
-                        stepAlpha = 255.0f;
-                    }
+                if (!queuedGlow && glow.Enabled && glow.Intensity > 0.0f) {
+                    const int sampleCount = (std::max)(2, glow.GetEffectiveSampleCount());
+                    if (sampleCount > 0) {
+                        const int r = (glow.Color >> 0) & 0xFF;
+                        const int g = (glow.Color >> 8) & 0xFF;
+                        const int b = (glow.Color >> 16) & 0xFF;
+                        const float colorAlpha = static_cast<float>((glow.Color >> 24) & 0xFF) / 255.0f;
+                        const float intensity = (std::max)(0.0f, (std::min)(glow.Intensity, 8.0f));
+                        const float qualityRadiusScale =
+                            glow.QualityMode == GlowQualityMode::Performance ? 0.84f :
+                            glow.QualityMode == GlowQualityMode::Balanced ? 1.00f : 1.14f;
+                        const float modeRadiusScale =
+                            glow.Mode == GlowMode::AmbientSoft ? 1.30f :
+                            glow.Mode == GlowMode::NeonTube ? 0.90f : 1.00f;
+                        const float glowRadius = (std::max)(
+                            0.0f,
+                            (std::min)(glow.Radius * glow.RadiusScale * modeRadiusScale * qualityRadiusScale, 240.0f));
+                        const float falloff = (std::max)(0.2f, (std::min)(glow.Falloff, 4.0f));
+                        const float coreStrength = (std::max)(0.0f, (std::min)(glow.CoreStrength, 2.0f));
+                        const float modeEnergyScale =
+                            glow.Mode == GlowMode::AmbientSoft ? 0.74f :
+                            glow.Mode == GlowMode::NeonTube ? 1.16f : 1.0f;
+                        const float qualityEnergyScale =
+                            glow.QualityMode == GlowQualityMode::Performance ? 0.80f :
+                            glow.QualityMode == GlowQualityMode::Balanced ? 1.0f : 1.18f;
+                        const float alphaBudget = colorAlpha * entityAlpha * intensity * modeEnergyScale * qualityEnergyScale;
+                        const auto& kernelDistances = glow.GetKernelDistances();
+                        const auto& kernelWeights = glow.GetKernelWeights();
+                        const float maxLayerAlpha =
+                            glow.QualityMode == GlowQualityMode::Performance ? 54.0f :
+                            glow.QualityMode == GlowQualityMode::Balanced ? 84.0f : 116.0f;
 
-                    for (int i = 0; i < sampleCount; i++) {
-                        const float t = static_cast<float>(i + 1) / static_cast<float>(sampleCount);
-                        const float dist = glow.Radius * t;
-                        const float weight = (i < static_cast<int>(alphaWeights.size())) ? alphaWeights[static_cast<size_t>(i)] : 1.0f;
-                        ImU32 stepColor = IM_COL32(static_cast<int>(r), static_cast<int>(g), static_cast<int>(b), static_cast<int>(stepAlpha * weight));
-                        
-                        draw_list->AddRect(
-                            ImVec2(p_min.x - dist, p_min.y - dist), 
-                            ImVec2(p_max.x + dist, p_max.y + dist), 
-                            stepColor, 
-                            style.Rounding + dist, 
-                            style.RoundingFlags, 
-                            1.5f // Thickness
-                        );
+                        for (int i = sampleCount - 1; i >= 0; --i) {
+                            const float distanceNorm = i < static_cast<int>(kernelDistances.size())
+                                ? kernelDistances[static_cast<size_t>(i)]
+                                : static_cast<float>(i + 1) / static_cast<float>(sampleCount);
+                            const float dist = glowRadius * distanceNorm;
+                            const float weight = i < static_cast<int>(kernelWeights.size())
+                                ? kernelWeights[static_cast<size_t>(i)]
+                                : (1.0f / static_cast<float>(sampleCount));
+
+                            float modeLayerScale = 1.0f;
+                            if (glow.Mode == GlowMode::NeonTube) {
+                                modeLayerScale = 1.36f - distanceNorm * 0.58f;
+                            } else if (glow.Mode == GlowMode::AmbientSoft) {
+                                modeLayerScale = 0.88f - distanceNorm * 0.12f;
+                            }
+                            if (modeLayerScale < 0.32f) {
+                                modeLayerScale = 0.32f;
+                            }
+
+                            float alphaLayer = alphaBudget * weight * static_cast<float>(sampleCount) * 84.0f;
+                            alphaLayer *= modeLayerScale;
+                            alphaLayer *= (1.0f + 0.10f * (1.0f / falloff));
+                            if (alphaLayer < 0.5f) {
+                                continue;
+                            }
+                            const float layerCap = maxLayerAlpha * (0.72f + (1.0f - distanceNorm) * 0.28f);
+                            if (alphaLayer > layerCap) {
+                                alphaLayer = layerCap;
+                            }
+
+                            draw_list->AddRectFilled(
+                                ImVec2(p_min.x - dist, p_min.y - dist),
+                                ImVec2(p_max.x + dist, p_max.y + dist),
+                                IM_COL32(r, g, b, static_cast<int>(alphaLayer)),
+                                style.Rounding + dist,
+                                style.RoundingFlags);
+                        }
+
+                        if (!glow.OuterOnly) {
+                            const float coreAlphaScale =
+                                glow.Mode == GlowMode::NeonTube ? 130.0f :
+                                glow.Mode == GlowMode::AmbientSoft ? 86.0f : 104.0f;
+                            const float coreAlpha = (std::max)(
+                                0.0f,
+                                (std::min)(132.0f, alphaBudget * coreStrength * coreAlphaScale));
+                            if (coreAlpha > 0.5f) {
+                                const float coreInset = (std::max)(0.0f, (std::min)(3.5f, 2.0f - coreStrength * 0.4f));
+                                draw_list->AddRectFilled(
+                                    ImVec2(p_min.x + coreInset, p_min.y + coreInset),
+                                    ImVec2(p_max.x - coreInset, p_max.y - coreInset),
+                                    IM_COL32(r, g, b, static_cast<int>(coreAlpha)),
+                                    (std::max)(0.0f, style.Rounding - coreInset),
+                                    style.RoundingFlags);
+                            }
+
+                            if (glow.InnerGlow) {
+                                const float innerAlpha = (std::max)(0.0f, (std::min)(96.0f, alphaBudget * 60.0f));
+                                if (innerAlpha > 0.5f) {
+                                    const float inset = 1.5f;
+                                    draw_list->AddRectFilled(
+                                        ImVec2(p_min.x + inset, p_min.y + inset),
+                                        ImVec2(p_max.x - inset, p_max.y - inset),
+                                        IM_COL32(r, g, b, static_cast<int>(innerAlpha)),
+                                        (std::max)(0.0f, style.Rounding - inset),
+                                        style.RoundingFlags);
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -889,7 +1412,7 @@ namespace RenderUtils {
                 }
             }
 
-            WindowHeaderSystem::DrawHeader(registry, entity, draw_list, p_min, p_max, style.Rounding, style.RoundingFlags);
+            WindowHeaderSystem::DrawHeader(registry, entity, draw_list, p_min, p_max, style.Rounding, style.RoundingFlags, entityAlpha);
 
             // Draw Border
             if (style.BorderSize > 0.0f && (borderColor & IM_COL32_A_MASK) != 0) {
@@ -907,6 +1430,72 @@ namespace RenderUtils {
             }
 
             ShapeSystem::Draw(registry, entity, draw_list, p_min, p_max, true);
+
+            // Image content rendering (within entity clip/header/padding constraints).
+            if (registry.any_of<Components::ImageLoader>(entity)) {
+                const auto& loader = registry.get<Components::ImageLoader>(entity);
+                const float topInset = WindowHeaderSystem::GetContentTopInset(registry, entity);
+
+                ImVec2 imageMin = ImVec2(
+                    p_min.x + style.ContentPaddingX,
+                    p_min.y + style.ContentPaddingY + topInset);
+                ImVec2 imageMax = ImVec2(
+                    p_max.x - style.ContentPaddingX,
+                    p_max.y - style.ContentPaddingY);
+
+                if (imageMax.x <= imageMin.x + 2.0f || imageMax.y <= imageMin.y + 2.0f) {
+                    imageMin = p_min;
+                    imageMax = p_max;
+                }
+
+                bool drawnImage = false;
+                if (loader.state == Components::ImageLoader::LoadState::Loaded && loader.texture &&
+                    DX12Init::g_pd3dSrvDescHeap && DX12Init::g_pd3dDevice) {
+                    constexpr int kImageSrvStart = 10; // Reserved in ImageLoaderSystem.
+                    const int textureIndex = static_cast<int>(reinterpret_cast<intptr_t>(loader.texture));
+                    const int maxDescriptors = static_cast<int>(DX12Init::g_pd3dSrvDescHeap->GetDesc().NumDescriptors);
+                    if (textureIndex >= kImageSrvStart && textureIndex < maxDescriptors) {
+                        D3D12_GPU_DESCRIPTOR_HANDLE texture_handle = DX12Init::GetGpuSrvHandle(textureIndex);
+                        if (texture_handle.ptr != 0) {
+                            draw_list->AddImage(
+                                (ImTextureID)texture_handle.ptr,
+                                imageMin,
+                                imageMax,
+                                ImVec2(0, 0),
+                                ImVec2(1, 1),
+                                ScaleColorAlpha(IM_COL32(255, 255, 255, 255), entityAlpha));
+                            drawnImage = true;
+                        }
+                    }
+                }
+
+                if (!drawnImage && (loader.state == Components::ImageLoader::LoadState::Loading ||
+                           loader.state == Components::ImageLoader::LoadState::Idle)) {
+                    draw_list->AddRectFilled(imageMin, imageMax, ScaleColorAlpha(IM_COL32(55, 55, 65, 255), entityAlpha), 6.0f);
+                    draw_list->AddRect(imageMin, imageMax, ScaleColorAlpha(IM_COL32(95, 95, 110, 255), entityAlpha), 6.0f);
+                    const char* loadingText = loader.LastStatusMessage.empty()
+                        ? "Loading image..."
+                        : loader.LastStatusMessage.c_str();
+                    ImVec2 textSize = ImGui::CalcTextSize(loadingText);
+                    ImVec2 textPos = ImVec2(
+                        imageMin.x + ((imageMax.x - imageMin.x) - textSize.x) * 0.5f,
+                        imageMin.y + ((imageMax.y - imageMin.y) - textSize.y) * 0.5f
+                    );
+                    draw_list->AddText(textPos, ScaleColorAlpha(IM_COL32(210, 210, 225, 255), entityAlpha), loadingText);
+                } else if (!drawnImage) {
+                    draw_list->AddRectFilled(imageMin, imageMax, ScaleColorAlpha(IM_COL32(65, 35, 35, 255), entityAlpha), 6.0f);
+                    draw_list->AddRect(imageMin, imageMax, ScaleColorAlpha(IM_COL32(155, 70, 70, 255), entityAlpha), 6.0f);
+                    const char* failText = loader.LastStatusMessage.empty()
+                        ? "Image failed"
+                        : loader.LastStatusMessage.c_str();
+                    ImVec2 textSize = ImGui::CalcTextSize(failText);
+                    ImVec2 textPos = ImVec2(
+                        imageMin.x + ((imageMax.x - imageMin.x) - textSize.x) * 0.5f,
+                        imageMin.y + ((imageMax.y - imageMin.y) - textSize.y) * 0.5f
+                    );
+                    draw_list->AddText(textPos, ScaleColorAlpha(IM_COL32(245, 190, 190, 255), entityAlpha), failText);
+                }
+            }
 
             // Debug Rendering
             if (DebugMode) {
@@ -947,7 +1536,13 @@ namespace RenderUtils {
                 } else {
                     // Precision Mode Debug: Draw bounds for each line of text
                 const auto& text = registry.get<TextComponent>(entity);
-                auto lines = CalculateTextLines(text, transform, &container);
+                const float debugTopInset = WindowHeaderSystem::GetContentTopInset(registry, entity);
+                auto lines = TextLayout::CalculateTextLines(
+                    text,
+                    transform,
+                    style.ContentPaddingX,
+                    style.ContentPaddingY,
+                    debugTopInset);
                 for (const auto& line : lines) {
                     // Apply scroll offset if present
                     float scrollOffset = 0.0f;
@@ -1001,6 +1596,7 @@ namespace RenderUtils {
                     int charIndexCounter = 0;
 
                     auto DrawTextSpan = [&](const std::string& str, const ImVec2& pos, ImU32 col, bool bold) {
+                        const ImU32 spanColor = ScaleColorAlpha(col, entityAlpha);
                         if (textComp.CharacterTransformCallback) {
                              float currentX = pos.x;
                              ImFont* font = ImGui::GetFont();
@@ -1014,11 +1610,12 @@ namespace RenderUtils {
                                  // Initial State
                                  ImVec2 charPos = ImVec2(currentX, pos.y);
                                  float rotation = 0.0f;
-                                 ImU32 charColor = col;
+                                 ImU32 charColor = spanColor;
                                  float scale = 1.0f;
 
                                  // Callback
                                  textComp.CharacterTransformCallback(charIndexCounter, c, charPos, rotation, charColor, scale);
+                                 charColor = ScaleColorAlpha(charColor, entityAlpha);
                                  
                                  if (rotation == 0.0f && scale == 1.0f) {
                                      draw_list->AddText(charPos, charColor, s);
@@ -1050,10 +1647,10 @@ namespace RenderUtils {
                              }
                         } else {
                             if (bold) {
-                                draw_list->AddText(ImVec2(pos.x + 1, pos.y), col, str.c_str());
-                                draw_list->AddText(pos, col, str.c_str());
+                                draw_list->AddText(ImVec2(pos.x + 1, pos.y), spanColor, str.c_str());
+                                draw_list->AddText(pos, spanColor, str.c_str());
                             } else {
-                                draw_list->AddText(pos, col, str.c_str());
+                                draw_list->AddText(pos, spanColor, str.c_str());
                             }
                             charIndexCounter += (int)str.length();
                         }
@@ -1204,7 +1801,11 @@ namespace RenderUtils {
                 float trackY = p_min.y + (p_max.y - p_min.y) * 0.5f - trackH * 0.5f;
                 
                 // Track Background
-                draw_list->AddRectFilled(ImVec2(p_min.x, trackY), ImVec2(p_max.x, trackY + trackH), slider.ColorTrack, 2.0f);
+                draw_list->AddRectFilled(
+                    ImVec2(p_min.x, trackY),
+                    ImVec2(p_max.x, trackY + trackH),
+                    ScaleColorAlpha(slider.ColorTrack, entityAlpha),
+                    2.0f);
                 
                 // Fill
                 float fillRatio = 0.0f;
@@ -1215,15 +1816,27 @@ namespace RenderUtils {
                 if (fillRatio > 1.0f) fillRatio = 1.0f;
                 
                 float fillWidth = fillRatio * (p_max.x - p_min.x);
-                draw_list->AddRectFilled(ImVec2(p_min.x, trackY), ImVec2(p_min.x + fillWidth, trackY + trackH), slider.ColorFill, 2.0f);
+                draw_list->AddRectFilled(
+                    ImVec2(p_min.x, trackY),
+                    ImVec2(p_min.x + fillWidth, trackY + trackH),
+                    ScaleColorAlpha(slider.ColorFill, entityAlpha),
+                    2.0f);
                 
                 // Knob
                 float knobX = p_min.x + fillWidth;
-                draw_list->AddCircleFilled(ImVec2(knobX, trackY + trackH * 0.5f), slider.KnobRadius, slider.ColorKnob);
+                draw_list->AddCircleFilled(
+                    ImVec2(knobX, trackY + trackH * 0.5f),
+                    slider.KnobRadius,
+                    ScaleColorAlpha(slider.ColorKnob, entityAlpha));
                 
                 // Hover Effect (Outer Glow)
                 if (registry.any_of<InputStateComponent>(entity) && registry.get<InputStateComponent>(entity).IsHovered) {
-                     draw_list->AddCircle(ImVec2(knobX, trackY + trackH * 0.5f), slider.KnobRadius + 1.0f, IM_COL32(200, 200, 255, 100), 12, 2.0f);
+                     draw_list->AddCircle(
+                        ImVec2(knobX, trackY + trackH * 0.5f),
+                        slider.KnobRadius + 1.0f,
+                        ScaleColorAlpha(IM_COL32(200, 200, 255, 100), entityAlpha),
+                        12,
+                        2.0f);
                 }
             }
 
@@ -1232,24 +1845,92 @@ namespace RenderUtils {
                 auto& textInput = registry.get<TextInputComponent>(entity);
                 bool focused = textInput.IsFocused;
                 ImU32 bgCol = focused ? IM_COL32(50, 50, 60, 255) : IM_COL32(40, 40, 45, 255);
-                draw_list->AddRectFilled(p_min, p_max, bgCol, 4.0f);
-                draw_list->AddRect(p_min, p_max, focused ? IM_COL32(100, 150, 255, 255) : IM_COL32(80, 80, 90, 255), 4.0f);
+                draw_list->AddRectFilled(p_min, p_max, ScaleColorAlpha(bgCol, entityAlpha), 4.0f);
+                draw_list->AddRect(
+                    p_min,
+                    p_max,
+                    ScaleColorAlpha(focused ? IM_COL32(100, 150, 255, 255) : IM_COL32(80, 80, 90, 255), entityAlpha),
+                    4.0f);
                 draw_list->PushClipRect(ImVec2(p_min.x + 4, p_min.y), ImVec2(p_max.x - 4, p_max.y), true);
                 const char* displayStr = textInput.Buffer.empty() ? textInput.Placeholder.c_str() : textInput.Buffer.c_str();
                 ImU32 textCol = textInput.Buffer.empty() ? IM_COL32(150, 150, 150, 255) : IM_COL32(255, 255, 255, 255);
                 float textH = ImGui::GetFontSize();
                 float textY = p_min.y + (p_max.y - p_min.y) * 0.5f - textH * 0.5f;
                 ImVec2 textPos = ImVec2(p_min.x + 5, textY);
-                draw_list->AddText(textPos, textCol, displayStr);
+                draw_list->AddText(textPos, ScaleColorAlpha(textCol, entityAlpha), displayStr);
                 if (focused && (int(ImGui::GetTime() * 2) % 2 == 0)) {
                     // Correctly position cursor based on CursorPos index
                     // (std::min) prevents macro expansion on Windows
                     std::string sub = textInput.Buffer.substr(0, (std::min)((size_t)textInput.CursorPos, textInput.Buffer.length()));
                     ImVec2 subSize = ImGui::CalcTextSize(sub.c_str());
                     float cursorX = textPos.x + subSize.x;
-                    draw_list->AddLine(ImVec2(cursorX, p_min.y + 4), ImVec2(cursorX, p_max.y - 4), IM_COL32(255, 255, 255, 255));
+                    draw_list->AddLine(
+                        ImVec2(cursorX, p_min.y + 4),
+                        ImVec2(cursorX, p_max.y - 4),
+                        ScaleColorAlpha(IM_COL32(255, 255, 255, 255), entityAlpha));
                 }
                 draw_list->PopClipRect();
+            }
+
+            // Options (segmented selection control)
+            if (registry.any_of<OptionsComponent>(entity)) {
+                auto& options = registry.get<OptionsComponent>(entity);
+                const int optionCount = static_cast<int>(options.Options.size());
+                if (optionCount > 0) {
+                    const float topInset = WindowHeaderSystem::GetContentTopInset(registry, entity);
+                    ImVec2 optionMin = ImVec2(
+                        p_min.x + style.ContentPaddingX,
+                        p_min.y + style.ContentPaddingY + topInset);
+                    ImVec2 optionMax = ImVec2(
+                        p_max.x - style.ContentPaddingX,
+                        p_max.y - style.ContentPaddingY);
+                    if (optionMax.x <= optionMin.x + 4.0f || optionMax.y <= optionMin.y + 4.0f) {
+                        optionMin = p_min;
+                        optionMax = p_max;
+                    }
+
+                    int selected = options.SelectedIndex;
+                    if (selected < 0) selected = 0;
+                    if (selected >= optionCount) selected = optionCount - 1;
+                    options.SelectedIndex = selected;
+
+                    const float width = optionMax.x - optionMin.x;
+                    const float height = optionMax.y - optionMin.y;
+                    if (width > 1.0f && height > 1.0f) {
+                        const float rounding = (std::max)(3.0f, (std::min)(style.Rounding, 8.0f));
+                        draw_list->AddRectFilled(optionMin, optionMax, IM_COL32(38, 42, 50, static_cast<int>(220.0f * entityAlpha)), rounding);
+                        draw_list->AddRect(optionMin, optionMax, IM_COL32(90, 95, 110, static_cast<int>(180.0f * entityAlpha)), rounding, 0, 1.0f);
+
+                        const float segmentWidth = width / static_cast<float>(optionCount);
+                        for (int i = 0; i < optionCount; ++i) {
+                            const ImVec2 segMin = ImVec2(optionMin.x + segmentWidth * static_cast<float>(i), optionMin.y);
+                            const ImVec2 segMax = ImVec2(segMin.x + segmentWidth, optionMax.y);
+                            const bool isSelected = i == selected;
+                            if (isSelected) {
+                                draw_list->AddRectFilled(segMin, segMax, IM_COL32(92, 145, 255, static_cast<int>(195.0f * entityAlpha)), rounding);
+                            } else if (i > 0) {
+                                draw_list->AddLine(
+                                    ImVec2(segMin.x, segMin.y + 2.0f),
+                                    ImVec2(segMin.x, segMax.y - 2.0f),
+                                    IM_COL32(80, 86, 100, static_cast<int>(170.0f * entityAlpha)),
+                                    1.0f);
+                            }
+
+                            const std::string& label = options.Options[static_cast<size_t>(i)];
+                            ImVec2 textSize = ImGui::CalcTextSize(label.c_str());
+                            ImVec2 textPos = ImVec2(
+                                segMin.x + (segmentWidth - textSize.x) * 0.5f,
+                                segMin.y + (height - textSize.y) * 0.5f
+                            );
+                            draw_list->AddText(
+                                textPos,
+                                isSelected
+                                    ? IM_COL32(255, 255, 255, static_cast<int>(245.0f * entityAlpha))
+                                    : IM_COL32(200, 210, 220, static_cast<int>(220.0f * entityAlpha)),
+                                label.c_str());
+                        }
+                    }
+                }
             }
 
             // Scrollbar
@@ -1270,7 +1951,7 @@ namespace RenderUtils {
                           }
                      }
                      if (draw) {
-                        draw_list->AddRectFilled(trackMin, trackMax, IM_COL32(30, 30, 35, 200), 4.0f);
+                        draw_list->AddRectFilled(trackMin, trackMax, ScaleColorAlpha(IM_COL32(30, 30, 35, 200), entityAlpha), 4.0f);
                         float trackH = trackMax.y - trackMin.y;
                         if (trackH > 0) {
                             float thumbH = trackH * (scroll.ViewHeight / scroll.ContentHeight);
@@ -1280,7 +1961,11 @@ namespace RenderUtils {
                             float ratio = (maxScroll > 0) ? (scroll.ScrollY / maxScroll) : 0;
                             if (ratio < 0) ratio = 0; if (ratio > 1) ratio = 1;
                             float thumbY = trackMin.y + ratio * (trackH - thumbH);
-                            draw_list->AddRectFilled(ImVec2(trackMin.x + 1, thumbY + 1), ImVec2(trackMax.x - 1, thumbY + thumbH - 1), IM_COL32(100, 100, 120, 255), 4.0f);
+                            draw_list->AddRectFilled(
+                                ImVec2(trackMin.x + 1, thumbY + 1),
+                                ImVec2(trackMax.x - 1, thumbY + thumbH - 1),
+                                ScaleColorAlpha(IM_COL32(100, 100, 120, 255), entityAlpha),
+                                4.0f);
                         }
                      }
                 }
@@ -1317,47 +2002,6 @@ namespace RenderUtils {
              s_HoveredDebugEntity = entt::null;
         }
 
-        // Render Images
-        auto imageView = registry.view<const Components::ImageLoader, const TransformComponent, const StyleComponent>();
-        imageView.each([draw_list](const auto& loader, const auto& transform, const auto& style) {
-            if (!style.CalculatedVisible) return;
-
-            ImVec2 p_min = transform.Position;
-            ImVec2 p_max = ImVec2(p_min.x + transform.Size.x, p_min.y + transform.Size.y);
-            int vtx_idx_start = draw_list->_VtxCurrentIdx;
-
-            if (loader.state == Components::ImageLoader::LoadState::Loaded && loader.texture) {
-                D3D12_GPU_DESCRIPTOR_HANDLE texture_handle = DX12Init::GetGpuSrvHandle((int)(intptr_t)loader.texture);
-                draw_list->AddImage((ImTextureID)texture_handle.ptr, p_min, p_max, ImVec2(0, 0), ImVec2(1, 1));
-            } else if (loader.state == Components::ImageLoader::LoadState::Loading ||
-                       loader.state == Components::ImageLoader::LoadState::Idle) {
-                draw_list->AddRectFilled(p_min, p_max, IM_COL32(55, 55, 65, 255), 6.0f);
-                draw_list->AddRect(p_min, p_max, IM_COL32(95, 95, 110, 255), 6.0f);
-                const char* loadingText = "Loading image...";
-                ImVec2 textSize = ImGui::CalcTextSize(loadingText);
-                ImVec2 textPos = ImVec2(
-                    p_min.x + (transform.Size.x - textSize.x) * 0.5f,
-                    p_min.y + (transform.Size.y - textSize.y) * 0.5f
-                );
-                draw_list->AddText(textPos, IM_COL32(210, 210, 225, 255), loadingText);
-            } else {
-                draw_list->AddRectFilled(p_min, p_max, IM_COL32(65, 35, 35, 255), 6.0f);
-                draw_list->AddRect(p_min, p_max, IM_COL32(155, 70, 70, 255), 6.0f);
-                const char* failText = "Image failed";
-                ImVec2 textSize = ImGui::CalcTextSize(failText);
-                ImVec2 textPos = ImVec2(
-                    p_min.x + (transform.Size.x - textSize.x) * 0.5f,
-                    p_min.y + (transform.Size.y - textSize.y) * 0.5f
-                );
-                draw_list->AddText(textPos, IM_COL32(245, 190, 190, 255), failText);
-            }
-
-            if (transform.Rotation != 0.0f) {
-                int vtx_idx_end = draw_list->_VtxCurrentIdx;
-                ImVec2 center = ImVec2(p_min.x + transform.Size.x * 0.5f, p_min.y + transform.Size.y * 0.5f);
-                RotateVertices(draw_list, vtx_idx_start, vtx_idx_end, center, transform.Rotation);
-            }
-        });
     }
 
     entt::entity UIRenderer::FindEntityByName(entt::registry& registry, const char* name) {

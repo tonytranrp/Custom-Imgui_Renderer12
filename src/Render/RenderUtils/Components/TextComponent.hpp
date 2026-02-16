@@ -224,13 +224,21 @@ namespace RenderUtils {
         inline std::vector<ImVec4> CalculateTextLines(
             const TextComponent& textComp,
             const TransformComponent& transform,
-            const ContainerComponent* container = nullptr) {
+            float contentPaddingX,
+            float contentPaddingY,
+            float contentTopInset) {
             std::vector<ImVec4> rects;
-            const float availableWidth = transform.Size.x - 20.0f;
+            const float clampedPaddingX = (contentPaddingX < 0.0f) ? 0.0f : contentPaddingX;
+            const float clampedPaddingY = (contentPaddingY < 0.0f) ? 0.0f : contentPaddingY;
+            const float clampedTopInset = (contentTopInset < 0.0f) ? 0.0f : contentTopInset;
+            float availableWidth = transform.Size.x - (clampedPaddingX * 2.0f);
+            if (availableWidth < 1.0f) {
+                availableWidth = 1.0f;
+            }
             const std::vector<TextLayoutLine> lines = CalculateLayout(textComp, availableWidth);
 
-            const float startX = transform.Position.x + 10.0f;
-            const float startY = transform.Position.y + ((container && container->Type == ContainerType::Window) ? 40.0f : 10.0f);
+            const float startX = transform.Position.x + clampedPaddingX;
+            const float startY = transform.Position.y + clampedPaddingY + clampedTopInset;
             float cursorY = startY;
 
             for (size_t i = 0; i < lines.size(); ++i) {
@@ -253,6 +261,16 @@ namespace RenderUtils {
             }
 
             return rects;
+        }
+
+        inline std::vector<ImVec4> CalculateTextLines(
+            const TextComponent& textComp,
+            const TransformComponent& transform,
+            const ContainerComponent* container = nullptr) {
+            const float defaultPaddingX = 10.0f;
+            const float defaultPaddingY = 10.0f;
+            const float defaultTopInset = (container && container->Type == ContainerType::Window) ? 30.0f : 0.0f;
+            return CalculateTextLines(textComp, transform, defaultPaddingX, defaultPaddingY, defaultTopInset);
         }
     } // namespace TextLayout
 }

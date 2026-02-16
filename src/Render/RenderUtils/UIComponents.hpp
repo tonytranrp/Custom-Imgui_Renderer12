@@ -22,6 +22,7 @@
 #include "Components/AnimationComponent.hpp"
 #include "Components/GlowComponent.hpp"
 #include "Components/ShadowComponent.hpp"
+#include "Components/ShaderComponent.hpp"
 #include "Components/WindowHeaderComponent.hpp"
 #include "Components/ShapeComponent.hpp"
 #include "CustomComponents/CustomComponent.hpp"

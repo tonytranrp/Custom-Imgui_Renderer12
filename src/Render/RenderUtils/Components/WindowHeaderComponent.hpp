@@ -142,7 +142,7 @@ namespace RenderUtils {
         }
 
         inline void DrawHeader(entt::registry& registry, entt::entity entity, ImDrawList* drawList,
-            const ImVec2& pMin, const ImVec2& pMax, float rounding, ImDrawFlags roundingFlags) {
+            const ImVec2& pMin, const ImVec2& pMax, float rounding, ImDrawFlags roundingFlags, float alphaMultiplier = 1.0f) {
             if (!drawList) {
                 return;
             }
@@ -162,16 +162,36 @@ namespace RenderUtils {
                 return;
             }
 
-            const ImVec2 headerMax = ImVec2(pMax.x, pMin.y + header->Height);
-            const ImDrawFlags headerRounding = roundingFlags & ImDrawFlags_RoundCornersTop;
-            drawList->AddRectFilled(pMin, headerMax, header->BackgroundColor, rounding, headerRounding);
-
-            if (header->ShowTitle && container->Name && container->Name[0] != '\0') {
-                drawList->AddText(ImVec2(pMin.x + header->PaddingX, pMin.y + header->PaddingY), header->TextColor, container->Name);
+            if (alphaMultiplier < 0.0f) {
+                alphaMultiplier = 0.0f;
+            }
+            if (alphaMultiplier > 1.0f) {
+                alphaMultiplier = 1.0f;
             }
 
-            if ((header->SeparatorColor & IM_COL32_A_MASK) != 0) {
-                drawList->AddLine(ImVec2(pMin.x, headerMax.y), ImVec2(pMax.x, headerMax.y), header->SeparatorColor);
+            auto applyAlpha = [alphaMultiplier](ImU32 color) {
+                const int r = (color >> 0) & 0xFF;
+                const int g = (color >> 8) & 0xFF;
+                const int b = (color >> 16) & 0xFF;
+                const int a = (color >> 24) & 0xFF;
+                const int scaledA = static_cast<int>(static_cast<float>(a) * alphaMultiplier);
+                return IM_COL32(r, g, b, scaledA);
+            };
+
+            const ImVec2 headerMax = ImVec2(pMax.x, pMin.y + header->Height);
+            const ImDrawFlags headerRounding = roundingFlags & ImDrawFlags_RoundCornersTop;
+            drawList->AddRectFilled(pMin, headerMax, applyAlpha(header->BackgroundColor), rounding, headerRounding);
+
+            if (header->ShowTitle && container->Name && container->Name[0] != '\0') {
+                drawList->AddText(
+                    ImVec2(pMin.x + header->PaddingX, pMin.y + header->PaddingY),
+                    applyAlpha(header->TextColor),
+                    container->Name);
+            }
+
+            const ImU32 separatorColor = applyAlpha(header->SeparatorColor);
+            if ((separatorColor & IM_COL32_A_MASK) != 0) {
+                drawList->AddLine(ImVec2(pMin.x, headerMax.y), ImVec2(pMax.x, headerMax.y), separatorColor);
             }
         }
     } // namespace WindowHeaderSystem

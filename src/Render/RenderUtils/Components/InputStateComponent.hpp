@@ -54,6 +54,26 @@ namespace RenderUtils {
                 inputState.JustPressed = (!previousClicked && inputState.IsClicked);
                 inputState.JustReleased = (previousClicked && !inputState.IsClicked);
             }
+
+            inline std::vector<ImVec4> CalculatePrecisionTextRects(
+                entt::registry& registry,
+                entt::entity entity,
+                const TransformComponent& transform) {
+                const auto* textComp = registry.try_get<TextComponent>(entity);
+                if (!textComp || !textComp->PrecisionMode()) {
+                    return {};
+                }
+
+                float paddingX = 10.0f;
+                float paddingY = 10.0f;
+                if (const auto* style = registry.try_get<StyleComponent>(entity)) {
+                    paddingX = style->ContentPaddingX;
+                    paddingY = style->ContentPaddingY;
+                }
+
+                const float topInset = WindowHeaderSystem::GetContentTopInset(registry, entity);
+                return TextLayout::CalculateTextLines(*textComp, transform, paddingX, paddingY, topInset);
+            }
         }
 
         inline void Update(entt::registry& registry, bool debugMode, entt::entity selectedEntity) {
@@ -267,8 +287,7 @@ namespace RenderUtils {
                         if (registry.any_of<TextComponent>(entity)) {
                             const auto& textComp = registry.get<TextComponent>(entity);
                             if (textComp.PrecisionMode()) {
-                                const auto* container = registry.try_get<ContainerComponent>(entity);
-                                const auto lines = TextLayout::CalculateTextLines(textComp, transform, container);
+                                const auto lines = detail::CalculatePrecisionTextRects(registry, entity, transform);
                                 if (!lines.empty()) {
                                     float vMinX = FLT_MAX;
                                     float vMaxX = -FLT_MAX;
@@ -312,10 +331,9 @@ namespace RenderUtils {
                         const auto& textComp = registry.get<TextComponent>(entity);
                         if (textComp.PrecisionMode()) {
                             iAmPrecision = true;
-                            const auto* container = registry.try_get<ContainerComponent>(entity);
                             TransformComponent tempTransform = transform;
                             tempTransform.Position = newPos;
-                            myRects = TextLayout::CalculateTextLines(textComp, tempTransform, container);
+                            myRects = detail::CalculatePrecisionTextRects(registry, entity, tempTransform);
                         }
                     }
                     if (!iAmPrecision && registry.any_of<ShapeComponent>(entity)) {
@@ -353,8 +371,7 @@ namespace RenderUtils {
                             const auto& textComp = registry.get<TextComponent>(other);
                             if (textComp.PrecisionMode()) {
                                 otherPrecision = true;
-                                const auto* container = registry.try_get<ContainerComponent>(other);
-                                otherRects = TextLayout::CalculateTextLines(textComp, otherTransform, container);
+                                otherRects = detail::CalculatePrecisionTextRects(registry, other, otherTransform);
                             }
                         }
                         if (!otherPrecision && registry.any_of<ShapeComponent>(other)) {

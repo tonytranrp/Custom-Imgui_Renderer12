@@ -52,6 +52,10 @@ extern "C" {
     // Starts fetching media from either URL or local path.
     uint64_t start_fetch_media(const char* source, int32_t source_kind);
 
+    // Cancels and removes a pending fetch request from the shared map.
+    // Safe to call for completed/invalid IDs (no-op).
+    void cancel_fetch_request(uint64_t id);
+
     // Checks the status of an image fetch operation
     // If the image is ready, returns a pointer to the heap-allocated image data
     // and writes its length, width, and height to the output parameters.

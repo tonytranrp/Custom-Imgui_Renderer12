@@ -208,6 +208,10 @@ namespace RenderUtils {
         } // namespace detail
 
         inline void Update(entt::registry& registry, float deltaTime) {
+            if (!std::isfinite(deltaTime) || deltaTime < 0.0f) {
+                deltaTime = 0.0f;
+            }
+
             auto view = registry.view<AnimationComponent>();
             view.each([deltaTime, &registry](const auto entity, auto& animComp) {
                 for (auto& anim : animComp.Animations) {
@@ -215,13 +219,16 @@ namespace RenderUtils {
                         continue;
                     }
 
-                    const float duration = anim.Duration;
+                    const float duration = (std::isfinite(anim.Duration) && anim.Duration > 0.0f) ? anim.Duration : 0.0f;
                     float t = 1.0f;
                     if (duration > 0.0f) {
+                        if (!std::isfinite(anim.Elapsed)) {
+                            anim.Elapsed = 0.0f;
+                        }
                         anim.Elapsed += deltaTime;
                         t = anim.Elapsed / duration;
                     } else {
-                        anim.Elapsed = duration;
+                        anim.Elapsed = 0.0f;
                     }
 
                     if (t >= 1.0f) {
@@ -242,8 +249,14 @@ namespace RenderUtils {
                     } else if (t < 0.0f) {
                         t = 0.0f;
                     }
+                    if (!std::isfinite(t)) {
+                        t = 1.0f;
+                    }
 
-                    const float easedT = Easing::Apply(t, anim.Easing);
+                    float easedT = Easing::Apply(t, anim.Easing);
+                    if (!std::isfinite(easedT)) {
+                        easedT = t;
+                    }
                     AnimationValue currentVal = anim.StartVal;
                     if (!detail::InterpolateValue(anim.StartVal, anim.EndVal, easedT, currentVal)) {
                         currentVal = (anim.Finished ? anim.EndVal : anim.StartVal);
