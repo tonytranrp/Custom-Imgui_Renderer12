@@ -8,3 +8,5 @@ crate-type = ["staticlib"]
 
 [dependencies]
 ureq = "2.9"
+image = { version = "0.24", default-features = false, features = ["gif", "jpeg", "png", "webp", "bmp", "tga"] }
+lazy_static = "1.4.0"

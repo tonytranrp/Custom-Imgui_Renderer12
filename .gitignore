@@ -33,3 +33,26 @@
 out
 .vs
 build
+
+# Rust
+**/target/
+
+# CMake / Ninja / Make
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+compile_commands.json
+Makefile
+.ninja_deps
+.ninja_log
+build*/
+cmake-build-*/
+
+# Visual Studio / user-local
+.vs/
+*.VC.db
+*.VC.opendb
+*.suo
+*.user
+*.userosscache
+*.sln.docstates

@@ -1,10 +1,12 @@
 #include "UIRenderer.hpp"
 #include "Dx12Init/Dx12Init.hpp"
-#include "RustComponents/RustBridge.hpp"
+#include "Components/ImageLoaderComponent.hpp" // Added for ImageLoader
 #include <unordered_map>
 #include <string>
 #include <algorithm>
 #include <cmath>
+#include <cstring>
+
 
 // UIComponents.hpp is already included in UIRenderer.hpp, which now includes the sub-files.
 
@@ -12,121 +14,92 @@ namespace RenderUtils {
 
     bool UIRenderer::DebugMode = false;
 
+
     // --- Internal Layout Helper ---
     namespace {
-        struct RenderSpan {
-            std::string text;
-            ImU32 color;
-            bool bold;
-            ImVec2 size;
-        };
+        constexpr float kDegToRad = 3.1415926535f / 180.0f;
 
-        struct RenderLine {
-            std::vector<RenderSpan> spans;
-            float width = 0.0f;
-            float height = 0.0f;
-        };
+        void RotateVertices(ImDrawList* draw_list, int vtx_idx_start, int vtx_idx_end, const ImVec2& center, float rotationDegrees) {
+            if (!draw_list || vtx_idx_end <= vtx_idx_start || rotationDegrees == 0.0f) {
+                return;
+            }
 
-        std::vector<RenderLine> CalculateLayout(const TextComponent& textComp, float availableWidth) {
-            std::vector<RenderLine> lines;
-            
-            // Ensure we have a font context
-            if (!ImGui::GetCurrentContext()) return lines;
+            float s = sinf(rotationDegrees * kDegToRad);
+            float c = cosf(rotationDegrees * kDegToRad);
 
-            auto MeasureText = [](const std::string& str, bool bold) -> ImVec2 {
-                // For now, bold measurement is same as normal. 
-                // If using real bold font, we'd push font here.
-                return ImGui::CalcTextSize(str.c_str());
-            };
+            const int maxIdx = (int)draw_list->VtxBuffer.Size;
+            const int start = (std::max)(0, vtx_idx_start);
+            const int end = (std::min)(maxIdx, vtx_idx_end);
 
-            // Flatten spans/rawtext
-            std::vector<RenderSpan> atoms;
-            if (!textComp.Spans.empty()) {
-                 for (const auto& span : textComp.Spans) {
-                    bool isBold = HasStyle(span.Style, TextStyle::Bold);
-                    atoms.push_back({ span.Text, span.Color, isBold, MeasureText(span.Text, isBold) });
-                }
+            for (int i = start; i < end; ++i) {
+                ImDrawVert& v = draw_list->VtxBuffer[i];
+                float px = v.pos.x - center.x;
+                float py = v.pos.y - center.y;
+                v.pos.x = px * c - py * s + center.x;
+                v.pos.y = px * s + py * c + center.y;
+            }
+        }
+
+        inline bool IsEntityVisible(entt::registry& registry, entt::entity entity) {
+            const auto* style = registry.try_get<StyleComponent>(entity);
+            return !style || style->CalculatedVisible;
+        }
+
+        inline std::vector<entt::entity> SortCustomEntities(entt::registry& registry, bool requireInput) {
+            std::vector<entt::entity> entities;
+            if (requireInput) {
+                auto view = registry.view<CustomComponent, InputStateComponent>();
+                entities.assign(view.begin(), view.end());
             } else {
-                 atoms.push_back({ textComp.RawText, textComp.Color, false, MeasureText(textComp.RawText, false) });
+                auto view = registry.view<CustomComponent>();
+                entities.assign(view.begin(), view.end());
             }
 
-            float lineHeight = ImGui::GetTextLineHeight() * textComp.LineHeight;
+            std::sort(entities.begin(), entities.end(), [&registry](entt::entity lhs, entt::entity rhs) {
+                const auto& lhsCustom = registry.get<CustomComponent>(lhs);
+                const auto& rhsCustom = registry.get<CustomComponent>(rhs);
+                if (lhsCustom.Priority != rhsCustom.Priority) {
+                    return lhsCustom.Priority > rhsCustom.Priority;
+                }
 
-            RenderLine currentLine;
-            currentLine.height = lineHeight;
+                const int lhsZ = registry.all_of<StyleComponent>(lhs) ? registry.get<StyleComponent>(lhs).ZIndexInt : 0;
+                const int rhsZ = registry.all_of<StyleComponent>(rhs) ? registry.get<StyleComponent>(rhs).ZIndexInt : 0;
+                if (lhsZ != rhsZ) {
+                    return lhsZ > rhsZ;
+                }
 
-            for (const auto& atom : atoms) {
-                 // Split atom into tokens (words and newlines)
-                 std::string remainingText = atom.text;
-                 size_t pos = 0;
-                 
-                 // Helper to push a word
-                 auto PushWord = [&](std::string word) {
-                      ImVec2 wordSize = MeasureText(word, atom.bold);
+                return entt::to_integral(lhs) < entt::to_integral(rhs);
+            });
 
-                      if (textComp.Wrap() && currentLine.width + wordSize.x > availableWidth && currentLine.width > 0) {
-                          lines.push_back(currentLine);
-                          currentLine = RenderLine();
-                          currentLine.height = lineHeight;
-                      }
-                      currentLine.spans.push_back({ word, atom.color, atom.bold, wordSize });
-                      currentLine.width += wordSize.x;
-                      // Dynamic height adjustment (if font size varies or text is taller than line height)
-                      if (wordSize.y > currentLine.height) {
-                           currentLine.height = wordSize.y;
-                      }
-                 };
+            return entities;
+        }
 
-                 // Helper to force newline
-                 auto ForceNewline = [&]() {
-                      lines.push_back(currentLine);
-                      currentLine = RenderLine();
-                      currentLine.height = lineHeight;
-                 };
-
-                 while (!remainingText.empty()) {
-                      size_t nextSpace = remainingText.find(' ');
-                      size_t nextNewline = remainingText.find('\n');
-                      
-                      size_t splitPos = std::string::npos;
-                      bool isNewline = false;
-
-                      if (nextSpace != std::string::npos && nextNewline != std::string::npos) {
-                          if (nextSpace < nextNewline) {
-                              splitPos = nextSpace;
-                          } else {
-                              splitPos = nextNewline;
-                              isNewline = true;
-                          }
-                      } else if (nextSpace != std::string::npos) {
-                          splitPos = nextSpace;
-                      } else if (nextNewline != std::string::npos) {
-                          splitPos = nextNewline;
-                          isNewline = true;
-                      }
-
-                      if (splitPos != std::string::npos) {
-                           std::string token = remainingText.substr(0, splitPos);
-                           if (isNewline) {
-                               if (!token.empty()) PushWord(token); // Push word before newline
-                               ForceNewline();
-                               remainingText.erase(0, splitPos + 1); // Remove word and \n
-                           } else {
-                               // It's a space
-                               token += ' '; // Include space in word
-                               PushWord(token);
-                               remainingText.erase(0, splitPos + 1);
-                           }
-                      } else {
-                           // No more delimiters
-                           PushWord(remainingText);
-                           remainingText.clear();
-                      }
-                 }
+        inline void InvokeCustomUpdateCallbacks(entt::registry& registry, float deltaTime) {
+            const auto entities = SortCustomEntities(registry, false);
+            for (auto entity : entities) {
+                if (!registry.valid(entity) || !registry.any_of<CustomComponent>(entity)) {
+                    continue;
+                }
+                auto& custom = registry.get<CustomComponent>(entity);
+                if (!custom.Enabled || !custom.OnUpdate || !IsEntityVisible(registry, entity)) {
+                    continue;
+                }
+                custom.OnUpdate(registry, entity, deltaTime);
             }
-            if (!currentLine.spans.empty()) lines.push_back(currentLine);
+        }
 
-            return lines;
+        inline void InvokeCustomInputCallbacks(entt::registry& registry) {
+            const auto entities = SortCustomEntities(registry, true);
+            for (auto entity : entities) {
+                if (!registry.valid(entity) || !registry.all_of<CustomComponent, InputStateComponent>(entity)) {
+                    continue;
+                }
+                auto& custom = registry.get<CustomComponent>(entity);
+                if (!custom.Enabled || !custom.OnInput || !IsEntityVisible(registry, entity)) {
+                    continue;
+                }
+                custom.OnInput(registry, entity, registry.get<InputStateComponent>(entity));
+            }
         }
     }
     // ------------------------------
@@ -233,6 +206,26 @@ namespace RenderUtils {
                     ImGui::DragFloat("Border Size", &sc.BorderSize);
                     ImGui::DragFloat("Rounding", &sc.Rounding);
                     ImGui::DragInt("Z-Index", &sc.ZIndexInt);
+                    ImGui::DragFloat2("Content Padding", &sc.ContentPaddingX, 0.25f, 0.0f, 100.0f);
+                    ImGui::Checkbox("Use Gradient", &sc.UseGradient);
+                    if (sc.UseGradient) {
+                        ImVec4 gTop = ImColor(sc.GradientTopColor);
+                        ImVec4 gBottom = ImColor(sc.GradientBottomColor);
+                        if (ImGui::ColorEdit4("Gradient Top", (float*)&gTop)) {
+                            sc.GradientTopColor = ImColor(gTop);
+                        }
+                        if (ImGui::ColorEdit4("Gradient Bottom", (float*)&gBottom)) {
+                            sc.GradientBottomColor = ImColor(gBottom);
+                        }
+                    }
+                    ImGui::Checkbox("Outline Enabled", &sc.OutlineEnabled);
+                    if (sc.OutlineEnabled) {
+                        ImVec4 outCol = ImColor(sc.OutlineColor);
+                        if (ImGui::ColorEdit4("Outline Color", (float*)&outCol)) {
+                            sc.OutlineColor = ImColor(outCol);
+                        }
+                        ImGui::DragFloat("Outline Thickness", &sc.OutlineThickness, 0.1f, 0.0f, 20.0f);
+                    }
                 }
             }
 
@@ -242,7 +235,8 @@ namespace RenderUtils {
                     auto& txt = registry.get<TextComponent>(s_SelectedEntity);
                     // Use a static buffer for editing text (simple version)
                     static char buf[256];
-                    strncpy(buf, txt.RawText.c_str(), 255);
+                    std::strncpy(buf, txt.RawText.c_str(), sizeof(buf) - 1);
+                    buf[sizeof(buf) - 1] = '\0';
                     if (ImGui::InputText("Content", buf, 256)) {
                         txt.RawText = buf;
                     }
@@ -278,11 +272,67 @@ namespace RenderUtils {
                     ImGui::DragFloat("Radius", &glow.Radius, 1.0f, 0.0f, 100.0f);
                     ImGui::DragFloat("Intensity", &glow.Intensity, 0.01f, 0.0f, 5.0f);
                     ImGui::DragInt("Samples", &glow.Samples, 1, 1, 32);
+                    ImGui::Checkbox("Cache Enabled", &glow.CacheEnabled);
+                    ImGui::DragInt("Max Samples", &glow.MaxSamples, 1, 1, 64);
                     
                     ImVec4 gCol = ImColor(glow.Color);
                     if (ImGui::ColorEdit4("Glow Color", (float*)&gCol)) {
                         glow.Color = ImColor(gCol);
+                        glow.CacheDirty = true;
                     }
+                }
+            }
+
+            if (registry.all_of<ShadowComponent>(s_SelectedEntity)) {
+                if (ImGui::CollapsingHeader("Shadow", ImGuiTreeNodeFlags_DefaultOpen)) {
+                    auto& shadow = registry.get<ShadowComponent>(s_SelectedEntity);
+                    ImGui::Checkbox("Enabled##shadow", &shadow.Enabled);
+                    ImVec4 shadowCol = ImColor(shadow.Color);
+                    if (ImGui::ColorEdit4("Shadow Color", (float*)&shadowCol)) {
+                        shadow.Color = ImColor(shadowCol);
+                    }
+                    ImGui::DragFloat2("Shadow Offset", &shadow.Offset.x, 0.25f);
+                    ImGui::DragFloat("Blur Radius", &shadow.BlurRadius, 0.5f, 0.0f, 100.0f);
+                    ImGui::DragFloat("Spread", &shadow.Spread, 0.5f, -50.0f, 50.0f);
+                    ImGui::DragInt("Shadow Samples", &shadow.Samples, 1, 1, 48);
+                    ImGui::Checkbox("Inset", &shadow.Inset);
+                }
+            }
+
+            if (registry.all_of<WindowHeaderComponent>(s_SelectedEntity)) {
+                if (ImGui::CollapsingHeader("Window Header", ImGuiTreeNodeFlags_DefaultOpen)) {
+                    auto& header = registry.get<WindowHeaderComponent>(s_SelectedEntity);
+                    ImGui::Checkbox("Enabled##header", &header.Enabled);
+                    ImGui::DragFloat("Height", &header.Height, 0.25f, 0.0f, 120.0f);
+                    ImGui::DragFloat2("Padding", &header.PaddingX, 0.25f);
+                    ImGui::Checkbox("Show Title", &header.ShowTitle);
+                    ImGui::Checkbox("Drag From Header Only", &header.DragFromHeaderOnly);
+                    ImGui::Checkbox("Clip Children Below Header", &header.ClipChildrenBelowHeader);
+
+                    ImVec4 hBg = ImColor(header.BackgroundColor);
+                    ImVec4 hText = ImColor(header.TextColor);
+                    ImVec4 hLine = ImColor(header.SeparatorColor);
+                    if (ImGui::ColorEdit4("Header BG", (float*)&hBg)) {
+                        header.BackgroundColor = ImColor(hBg);
+                    }
+                    if (ImGui::ColorEdit4("Header Text", (float*)&hText)) {
+                        header.TextColor = ImColor(hText);
+                    }
+                    if (ImGui::ColorEdit4("Header Separator", (float*)&hLine)) {
+                        header.SeparatorColor = ImColor(hLine);
+                    }
+                }
+            }
+
+            if (registry.all_of<ShapeComponent>(s_SelectedEntity)) {
+                if (ImGui::CollapsingHeader("Shape", ImGuiTreeNodeFlags_DefaultOpen)) {
+                    auto& shape = registry.get<ShapeComponent>(s_SelectedEntity);
+                    ImGui::Checkbox("Enabled##shape", &shape.Enabled);
+                    ImGui::Checkbox("Draw Behind Content", &shape.DrawBehindContent);
+                    ImGui::Checkbox("Clip To Entity", &shape.ClipToEntity);
+                    ImGui::Checkbox("Use For HitTest", &shape.UseForHitTest);
+                    ImGui::DragInt("Priority##shape", &shape.Priority, 1, -100, 100);
+                    ImGui::Text("Shape Count: %d", static_cast<int>(shape.Shapes.size()));
                 }
             }
 
@@ -414,9 +464,12 @@ namespace RenderUtils {
     }
 
     void UIRenderer::Init(entt::registry& registry) {
-
+        Components::ImageLoaderSystem::Register(registry);
     }
 
+    void UIRenderer::FreeImageResource(entt::registry& registry, entt::entity entity) {
+        Components::ImageLoaderSystem::FreeEntity(registry, entity);
+    }
 
 
 
@@ -537,12 +590,16 @@ namespace RenderUtils {
             }
         }
 
-        // 3. Standard Updates
+        // 3. Behavior-critical update order:
+        // UpdateAnimations -> ResolveTransforms -> ResolveDepth -> UpdateInput -> UpdateText -> UpdateImageLoader
         UpdateAnimations(registry, deltaTime);
+        InvokeCustomUpdateCallbacks(registry, deltaTime);
         ResolveTransforms(registry);
         ResolveDepth(registry);
         UpdateInput(registry);
+        InvokeCustomInputCallbacks(registry);
         UpdateText(registry);
+        UpdateImageLoader(registry);
     }
 
     void UIRenderer::ResolveDepth(entt::registry& registry) {
@@ -650,11 +707,7 @@ namespace RenderUtils {
                     ImVec2 myMin = transform.Position;
                     ImVec2 myMax = ImVec2(myMin.x + transform.Size.x, myMin.y + transform.Size.y);
                     
-                    // Header compensation for Windows
-                    if (registry.all_of<ContainerComponent>(entity) && 
-                        registry.get<ContainerComponent>(entity).Type == ContainerType::Window) {
-                        myMin.y += 30.0f;
-                    }
+                    myMin.y += WindowHeaderSystem::GetContentTopInset(registry, entity);
 
                     nextClip.x = (parentClip.x > myMin.x) ? parentClip.x : myMin.x;
                     nextClip.y = (parentClip.y > myMin.y) ? parentClip.y : myMin.y;
@@ -694,553 +747,15 @@ namespace RenderUtils {
     }
 
     void UIRenderer::UpdateInput(entt::registry& registry) {
-        ImVec2 mousePos = ImGui::GetMousePos();
-        bool mouseClicked = ImGui::IsMouseClicked(ImGuiMouseButton_Left);
-        bool mouseDown = ImGui::IsMouseDown(ImGuiMouseButton_Left);
-
-        // 1. Sort by Z-Index (Descending) for Input Capture
-        registry.sort<StyleComponent>([](const auto& lhs, const auto& rhs) {
-            return lhs.ZIndexInt > rhs.ZIndexInt; // DESCENDING
-        });
-
-        auto view = registry.view<StyleComponent, TransformComponent, InputStateComponent>();
-        view.use<StyleComponent>(); // Iterate in Z-Index Descending order
-
-        bool inputCaptured = false;
-
-        for (auto entity : view) {
-            auto& transform = view.get<TransformComponent>(entity);
-            auto& inputState = view.get<InputStateComponent>(entity);
-            auto& style = view.get<StyleComponent>(entity);
-
-            if (!style.CalculatedVisible) {
-                inputState.IsHovered = false;
-                inputState.IsClicked = false;
-                continue;
-            }
-            
-            // Check Dragging State first (maintain drag even if mouse moves fast)
-            bool isDragging = false;
-            if (registry.any_of<DraggableComponent>(entity)) {
-                isDragging = registry.get<DraggableComponent>(entity).IsDragging;
-            }
-
-            if (isDragging) {
-                inputCaptured = true; // Dragging consumes input
-            }
-
-            // Hit Test
-            ImVec2 p_min = transform.Position;
-            ImVec2 p_max = ImVec2(p_min.x + transform.Size.x, p_min.y + transform.Size.y);
-            
-            // Expanded Bounds Check (for Dropdowns)
-            if (registry.any_of<ExpandComponent>(entity)) {
-                const auto& expand = registry.get<ExpandComponent>(entity);
-                if (expand.IsExpanded) {
-                     if (expand.Direction == ExpandDirection::Down)
-                         p_max.y += expand.CurrentHeight;
-                     else
-                         p_min.y -= expand.CurrentHeight;
-                }
-            }
-
-            bool hovered = (mousePos.x >= p_min.x && mousePos.x <= p_max.x &&
-                            mousePos.y >= p_min.y && mousePos.y <= p_max.y);
-
-            // Check against Calculated Clip Rect (from ResolveTransforms)
-            // If the mouse is outside the visible area of the parent(s), we are not hovered.
-            if (mousePos.x < inputState.ClipRect.x || mousePos.x > inputState.ClipRect.z ||
-                mousePos.y < inputState.ClipRect.y || mousePos.y > inputState.ClipRect.w) {
-                hovered = false;
-            }
-
-            // If input already captured by a higher element, we cannot be hovered
-            if (inputCaptured) {
-                inputState.IsHovered = false;
-                inputState.IsClicked = false;
-                continue;
-            }
-
-            if (hovered) {
-                // If we are blocking input, we consume the event for layers below us.
-                if (inputState.BlockInput) {
-                     inputCaptured = true;
-                }
-
-                inputState.IsHovered = true;
-                
-                // Handle Scrolling
-                if (registry.any_of<ScrollComponent>(entity)) {
-                    auto& scroll = registry.get<ScrollComponent>(entity);
-                    
-                    // Update View Height based on current Transform Size
-                    scroll.ViewHeight = transform.Size.y;
-
-                    if (scroll.ContentHeight > scroll.ViewHeight) {
-                        float wheel = ImGui::GetIO().MouseWheel;
-                        if (wheel != 0) {
-                            scroll.ScrollY -= wheel * scroll.Speed;
-                            if (scroll.ScrollY < 0) scroll.ScrollY = 0;
-                            float maxScroll = scroll.ContentHeight - scroll.ViewHeight;
-                            if (scroll.ScrollY > maxScroll) scroll.ScrollY = maxScroll;
-                        }
-                    } else {
-                        scroll.ScrollY = 0;
-                    }
-                }
-
-                if (mouseClicked) {
-                    inputState.IsClicked = true;
-                } else if (!mouseDown) {
-                    inputState.IsClicked = false;
-                }
-            } else {
-                inputState.IsHovered = false;
-                if (!mouseDown) inputState.IsClicked = false; 
-            }
-
-            // Handle TextInput Focus
-            if (registry.any_of<TextInputComponent>(entity)) {
-                auto& textInput = registry.get<TextInputComponent>(entity);
-                if (mouseClicked) {
-                    if (hovered) { 
-                         textInput.IsFocused = true;
-                    } else {
-                         textInput.IsFocused = false;
-                    }
-                }
-            }
-            
-            // Handle Slider Dragging State
-            if (registry.any_of<SliderComponent>(entity)) {
-                auto& slider = registry.get<SliderComponent>(entity);
-                if (hovered && mouseClicked) {
-                    slider.IsDragging = true;
-                }
-                if (!mouseDown) {
-                    slider.IsDragging = false;
-                }
-            }
-        }
-
-        // 2. Handle Dragging Logic
-        auto dragView = registry.view<TransformComponent, DraggableComponent, InputStateComponent>();
-        
-        for (auto entity : dragView) {
-            auto& transform = dragView.get<TransformComponent>(entity);
-            auto& draggable = dragView.get<DraggableComponent>(entity);
-            const auto& inputState = dragView.get<InputStateComponent>(entity);
-
-            // Locked Check
-            if (registry.any_of<LockedComponent>(entity)) {
-                if (registry.get<LockedComponent>(entity).Locked) {
-                    draggable.IsDragging = false;
-                    continue;
-                }
-            }
-
-            bool draggingAllowed = (draggable.Mode != DragMode::None) || DebugMode;
-            if (!draggingAllowed) continue;
-
-            // Start Drag
-            // Debug Consistency: Allow dragging selected entity even if occluded by children, and ignore header constraint
-            bool debugOverride = DebugMode && (entity == s_SelectedEntity);
-            bool effectivelyHovered = inputState.IsHovered;
-
-            if (debugOverride && !effectivelyHovered) {
-                 // Raw Hit Test
-                 if (mousePos.x >= transform.Position.x && mousePos.x <= transform.Position.x + transform.Size.x &&
-                     mousePos.y >= transform.Position.y && mousePos.y <= transform.Position.y + transform.Size.y) {
-                     effectivelyHovered = true;
-                 }
-            }
-
-            if (effectivelyHovered && mouseClicked && !draggable.IsDragging) {
-                // Constraint: Windows can only be dragged by their header (top 30px)
-                bool canDrag = true;
-                
-                // Only enforce header constraint if NOT in Debug Mode
-                if (!DebugMode) {
-                    if (registry.all_of<ContainerComponent>(entity) && registry.get<ContainerComponent>(entity).Type == ContainerType::Window) {
-                        if (mousePos.y > transform.Position.y + 30.0f) {
-                            canDrag = false;
-                        }
-                    }
-                }
-                
-                if (canDrag) {
-                    draggable.IsDragging = true;
-                    draggable.DragOffset = ImVec2(mousePos.x - transform.Position.x, mousePos.y - transform.Position.y);
-                }
-            }
-
-            // Continue Drag
-            if (draggable.IsDragging) {
-                if (mouseDown) {
-                    ImVec2 newPos = ImVec2(mousePos.x - draggable.DragOffset.x, mousePos.y - draggable.DragOffset.y);
-                    
-                    if (draggable.Mode == DragMode::HorizontalOnly) {
-                        newPos.y = transform.Position.y; // Lock Y
-                    } else if (draggable.Mode == DragMode::VerticalOnly) {
-                        newPos.x = transform.Position.x; // Lock X
-                    }
-
-                    // Constraint Logic
-                    if (draggable.Constraint == DragConstraint::Parent && registry.any_of<ParentComponent>(entity)) {
-                        auto& parentComp = registry.get<ParentComponent>(entity);
-                        if (registry.valid(parentComp.ParentEntity) && registry.all_of<TransformComponent>(parentComp.ParentEntity)) {
-                            const auto& parentTrans = registry.get<TransformComponent>(parentComp.ParentEntity);
-                            
-                            float minX = parentTrans.Position.x;
-                            float minY = parentTrans.Position.y;
-                            float maxX = parentTrans.Position.x + parentTrans.Size.x - transform.Size.x;
-                            float maxY = parentTrans.Position.y + parentTrans.Size.y - transform.Size.y;
-
-                            bool precisionConstraintApplied = false;
-
-                            if (registry.any_of<TextComponent>(entity)) {
-                                const auto& tc = registry.get<TextComponent>(entity);
-                                if (tc.PrecisionMode()) { 
-                                    const auto* cp = registry.try_get<ContainerComponent>(entity);
-                                    std::vector<ImVec4> lines = CalculateTextLines(tc, transform, cp);
-                                    
-                                    if (!lines.empty()) {
-                                        float vMinX = FLT_MAX, vMaxX = -FLT_MAX, vMinY = FLT_MAX, vMaxY = -FLT_MAX;
-                                        for(const auto& l : lines) {
-                                            if(l.x < vMinX) vMinX = l.x;
-                                            if(l.x + l.z > vMaxX) vMaxX = l.x + l.z;
-                                            if(l.y < vMinY) vMinY = l.y;
-                                            if(l.y + l.w > vMaxY) vMaxY = l.y + l.w;
-                                        }
-                                        
-                                        float offMinX = vMinX - transform.Position.x;
-                                        float offMaxX = vMaxX - transform.Position.x;
-                                        float offMinY = vMinY - transform.Position.y;
-                                        float offMaxY = vMaxY - transform.Position.y;
-
-                                        minX = parentTrans.Position.x - offMinX;
-                                        minY = parentTrans.Position.y - offMinY;
-                                        maxX = (parentTrans.Position.x + parentTrans.Size.x) - offMaxX;
-                                        maxY = (parentTrans.Position.y + parentTrans.Size.y) - offMaxY;
-                                        
-                                        precisionConstraintApplied = true;
-                                    }
-                                }
-                            }
-                            
-                            if (maxX < minX) maxX = minX;
-                            if (maxY < minY) maxY = minY;
-
-                            if (newPos.x < minX) newPos.x = minX;
-                            if (newPos.x > maxX) newPos.x = maxX;
-                            if (newPos.y < minY) newPos.y = minY;
-                            if (newPos.y > maxY) newPos.y = maxY;
-                        }
-                    }
-
-                    // Collision Detection
-                    if (registry.any_of<CollisionComponent>(entity)) {
-                        ImVec2 p_old = transform.Position; 
-
-                        std::vector<ImVec4> myRects;
-                        bool iAmPrecision = false;
-                        if (registry.any_of<TextComponent>(entity)) {
-                            const auto& tc = registry.get<TextComponent>(entity);
-                            if (tc.PrecisionMode()) {
-                                iAmPrecision = true;
-                                const auto* cp = registry.try_get<ContainerComponent>(entity);
-                                TransformComponent tempTrans = transform;
-                                tempTrans.Position = newPos;
-                                myRects = CalculateTextLines(tc, tempTrans, cp);
-                            }
-                        }
-
-                        if (!iAmPrecision) {
-                            myRects.push_back(ImVec4(newPos.x, newPos.y, transform.Size.x, transform.Size.y));
-                        }
-
-                        auto collisionView = registry.view<TransformComponent, CollisionComponent>();
-                        for (auto other : collisionView) {
-                            if (other == entity) continue;
-                            
-                            // Check parent sharing
-                            bool shareParent = false;
-                            entt::entity parent1 = entt::null;
-                            entt::entity parent2 = entt::null;
-                            if (registry.any_of<ParentComponent>(entity)) parent1 = registry.get<ParentComponent>(entity).ParentEntity;
-                            if (registry.any_of<ParentComponent>(other)) parent2 = registry.get<ParentComponent>(other).ParentEntity;
-                            if (parent1 == parent2) shareParent = true;
-                            if (!shareParent) continue;
-
-                            const auto& otherTrans = collisionView.get<TransformComponent>(other);
-                            
-                            std::vector<ImVec4> otherRects;
-                            bool otherIsPrecision = false;
-                            if (registry.any_of<TextComponent>(other)) {
-                                const auto& tc = registry.get<TextComponent>(other);
-                                if (tc.PrecisionMode()) {
-                                    otherIsPrecision = true;
-                                    const auto* cp = registry.try_get<ContainerComponent>(other);
-                                    otherRects = CalculateTextLines(tc, otherTrans, cp);
-                                }
-                            }
-                            if (!otherIsPrecision) {
-                                otherRects.push_back(ImVec4(otherTrans.Position.x, otherTrans.Position.y, otherTrans.Size.x, otherTrans.Size.y));
-                            }
-                            
-                            for (const auto& myR : myRects) {
-                                ImVec2 p_min = ImVec2(myR.x, myR.y);
-                                ImVec2 p_max = ImVec2(myR.x + myR.z, myR.y + myR.w);
-                                ImVec2 delta = ImVec2(newPos.x - p_old.x, newPos.y - p_old.y);
-                                ImVec2 old_rect_min = ImVec2(p_min.x - delta.x, p_min.y - delta.y);
-                                
-                                for (const auto& otherR : otherRects) {
-                                    ImVec2 o_min = ImVec2(otherR.x, otherR.y);
-                                    ImVec2 o_max = ImVec2(otherR.x + otherR.z, otherR.y + otherR.w);
-
-                                    if (p_min.x < o_max.x && p_max.x > o_min.x &&
-                                        p_min.y < o_max.y && p_max.y > o_min.y) {
-                                        
-                                        float overlapLeft = (p_min.x + myR.z) - o_min.x;
-                                        float overlapRight = (o_min.x + otherR.z) - p_min.x;
-                                        float overlapTop = (p_min.y + myR.w) - o_min.y;
-                                        float overlapBottom = (o_min.y + otherR.w) - p_min.y;
-                                        
-                                        bool wasLeft = (old_rect_min.x + myR.z) <= o_min.x + 1.0f;
-                                        bool wasRight = old_rect_min.x >= o_max.x - 1.0f;
-                                        bool wasAbove = (old_rect_min.y + myR.w) <= o_min.y + 1.0f;
-                                        bool wasBelow = old_rect_min.y >= o_max.y - 1.0f;
-
-                                        float minOverlap = FLT_MAX;
-                                        int axis = 0;
-
-                                        if (wasLeft && overlapLeft < minOverlap) { minOverlap = overlapLeft; axis = 1; }
-                                        if (wasRight && overlapRight < minOverlap) { minOverlap = overlapRight; axis = 2; }
-                                        if (wasAbove && overlapTop < minOverlap) { minOverlap = overlapTop; axis = 3; }
-                                        if (wasBelow && overlapBottom < minOverlap) { minOverlap = overlapBottom; axis = 4; }
-
-                                        if (axis == 0) {
-                                             if (overlapLeft < minOverlap) { minOverlap = overlapLeft; axis = 1; }
-                                             if (overlapRight < minOverlap) { minOverlap = overlapRight; axis = 2; }
-                                             if (overlapTop < minOverlap) { minOverlap = overlapTop; axis = 3; }
-                                             if (overlapBottom < minOverlap) { minOverlap = overlapBottom; axis = 4; }
-                                        }
-
-                                        if (axis == 1) newPos.x -= overlapLeft;
-                                        else if (axis == 2) newPos.x += overlapRight;
-                                        else if (axis == 3) newPos.y -= overlapTop;
-                                        else if (axis == 4) newPos.y += overlapBottom;
-                                        
-                                        goto resolved_collision; 
-                                    }
-                                }
-                            }
-                            resolved_collision:;
-                        }
-                    }
-
-                    transform.Position = newPos;
-
-                    if (registry.any_of<ParentComponent>(entity)) {
-                        auto& parentComp = registry.get<ParentComponent>(entity);
-                        if (registry.valid(parentComp.ParentEntity) && registry.all_of<TransformComponent>(parentComp.ParentEntity)) {
-                            const auto& parentTrans = registry.get<TransformComponent>(parentComp.ParentEntity);
-                            parentComp.RelativeOffset = ImVec2(transform.Position.x - parentTrans.Position.x, 
-                                                               transform.Position.y - parentTrans.Position.y);
-                        }
-                    }
-                } else {
-                    draggable.IsDragging = false;
-                }
-            }
-        }
-
-        // 3. Update Children Positions
-        auto childView = registry.view<TransformComponent, ParentComponent>();
-        for (auto entity : childView) {
-            auto& transform = childView.get<TransformComponent>(entity);
-            const auto& parent = childView.get<ParentComponent>(entity);
-
-            if (registry.valid(parent.ParentEntity)) {
-                if (registry.all_of<TransformComponent>(parent.ParentEntity)) {
-                    const auto& parentTrans = registry.get<TransformComponent>(parent.ParentEntity);
-                    
-                    float scrollOffset = 0.0f;
-                    if (registry.all_of<ScrollComponent>(parent.ParentEntity)) {
-                        scrollOffset = registry.get<ScrollComponent>(parent.ParentEntity).ScrollY;
-                    }
-
-                    transform.Position = ImVec2(parentTrans.Position.x + parent.RelativeOffset.x, 
-                                              parentTrans.Position.y + parent.RelativeOffset.y - scrollOffset);
-                }
-            }
-        }
+        InputStateSystem::Update(registry, DebugMode, s_SelectedEntity);
     }
 
     void UIRenderer::UpdateText(entt::registry& registry) {
-        auto view = registry.view<TextInputComponent, InputStateComponent>();
-        for (auto entity : view) {
-            auto& textInput = view.get<TextInputComponent>(entity);
-
-            if (textInput.IsFocused) {
-                ImGuiIO& io = ImGui::GetIO();
-
-                // Safety: Clamp CursorPos
-                if (textInput.CursorPos < 0) textInput.CursorPos = 0;
-                if (textInput.CursorPos > textInput.Buffer.length()) textInput.CursorPos = (int)textInput.Buffer.length();
-                
-                // --- Cursor Movement ---
-                if (ImGui::IsKeyPressed(ImGuiKey_LeftArrow)) {
-                    if (textInput.CursorPos > 0) textInput.CursorPos--;
-                }
-                if (ImGui::IsKeyPressed(ImGuiKey_RightArrow)) {
-                    if (textInput.CursorPos < textInput.Buffer.length()) textInput.CursorPos++;
-                }
-                if (ImGui::IsKeyPressed(ImGuiKey_Home)) {
-                    textInput.CursorPos = 0;
-                }
-                if (ImGui::IsKeyPressed(ImGuiKey_End)) {
-                    textInput.CursorPos = (int)textInput.Buffer.length();
-                }
-
-                // --- Editing ---
-
-                // Handle Backspace (Delete character BEFORE cursor)
-                // Note: We use Repeat mode for Backspace for better feel
-                if (ImGui::IsKeyPressed(ImGuiKey_Backspace, true)) {
-                    if (textInput.CursorPos > 0 && !textInput.Buffer.empty()) {
-                        textInput.Buffer.erase(textInput.CursorPos - 1, 1);
-                        textInput.CursorPos--;
-                        if (textInput.OnChange) textInput.OnChange(textInput.Buffer);
-                    }
-                }
-
-                // Handle Delete (Delete character AFTER cursor)
-                if (ImGui::IsKeyPressed(ImGuiKey_Delete, true)) {
-                    if (textInput.CursorPos < textInput.Buffer.length()) {
-                        textInput.Buffer.erase(textInput.CursorPos, 1);
-                        if (textInput.OnChange) textInput.OnChange(textInput.Buffer);
-                    }
-                }
-
-                // Handle Paste (Ctrl+V)
-                if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_V)) {
-                    const char* clipboard = ImGui::GetClipboardText();
-                    if (clipboard) {
-                        std::string clipStr = clipboard;
-                        if (textInput.Buffer.length() + clipStr.length() <= textInput.MaxLength) {
-                            textInput.Buffer.insert(textInput.CursorPos, clipStr);
-                            textInput.CursorPos += (int)clipStr.length();
-                            if (textInput.OnChange) textInput.OnChange(textInput.Buffer);
-                        }
-                    }
-                }
-
-                // Handle Character Input
-                for (int i = 0; i < io.InputQueueCharacters.Size; i++) {
-                    char c = (char)io.InputQueueCharacters[i];
-                    if (c > 0 && c < 0x80) { // ASCII only for now
-                         // Ignore control characters (like Backspace which is handled separately, or Enter)
-                         if (c >= 32) { 
-                             if (textInput.Buffer.length() < textInput.MaxLength) {
-                                 // Safety clamp again just in case
-                                 if (textInput.CursorPos > textInput.Buffer.length()) textInput.CursorPos = (int)textInput.Buffer.length();
-                                 
-                                 textInput.Buffer.insert(textInput.CursorPos, 1, c);
-                                 textInput.CursorPos++;
-                                 if (textInput.OnChange) textInput.OnChange(textInput.Buffer);
-                             }
-                         }
-                    }
-                }
-                
-                // Handle Enter (optional, e.g. lose focus)
-                if (ImGui::IsKeyPressed(ImGuiKey_Enter)) {
-                    // textInput.IsFocused = false; // Optional
-                }
-            }
-        }
+        TextInputSystem::Update(registry);
     }
 
     void UIRenderer::UpdateAnimations(entt::registry& registry, float deltaTime) {
-        auto view = registry.view<AnimationComponent>();
-        view.each([deltaTime, &registry](auto entity, auto& animComp) {
-            for (auto& anim : animComp.Animations) {
-                if (anim.Finished) continue;
-
-                anim.Elapsed += deltaTime;
-                float t = anim.Elapsed / anim.Duration;
-                
-                if (t >= 1.0f) {
-                    if (anim.Loop) {
-                        anim.Elapsed = 0.0f;
-                        t = 0.0f;
-                    } else {
-                        t = 1.0f;
-                        anim.Finished = true;
-                    }
-                }
-
-                float easedT = Easing::Apply(t, anim.Easing);
-
-                // Interpolate
-                AnimationValue currentVal;
-                
-                // Float
-                if (std::holds_alternative<float>(anim.StartVal.data) && std::holds_alternative<float>(anim.EndVal.data)) {
-                    float start = std::get<float>(anim.StartVal.data);
-                    float end = std::get<float>(anim.EndVal.data);
-                    currentVal.data = start + (end - start) * easedT;
-                }
-                // ImVec2
-                else if (std::holds_alternative<ImVec2>(anim.StartVal.data) && std::holds_alternative<ImVec2>(anim.EndVal.data)) {
-                    ImVec2 start = std::get<ImVec2>(anim.StartVal.data);
-                    ImVec2 end = std::get<ImVec2>(anim.EndVal.data);
-                    currentVal.data = ImVec2(start.x + (end.x - start.x) * easedT, start.y + (end.y - start.y) * easedT);
-                }
-                // Color (ImU32) - Interpolate RGBA
-                else if (std::holds_alternative<ImU32>(anim.StartVal.data) && std::holds_alternative<ImU32>(anim.EndVal.data)) {
-                    ImU32 start = std::get<ImU32>(anim.StartVal.data);
-                    ImU32 end = std::get<ImU32>(anim.EndVal.data);
-                    
-                    int sR = (start >> 0) & 0xFF;
-                    int sG = (start >> 8) & 0xFF;
-                    int sB = (start >> 16) & 0xFF;
-                    int sA = (start >> 24) & 0xFF;
-
-                    int eR = (end >> 0) & 0xFF;
-                    int eG = (end >> 8) & 0xFF;
-                    int eB = (end >> 16) & 0xFF;
-                    int eA = (end >> 24) & 0xFF;
-
-                    int cR = sR + (int)((eR - sR) * easedT);
-                    int cG = sG + (int)((eG - sG) * easedT);
-                    int cB = sB + (int)((eB - sB) * easedT);
-                    int cA = sA + (int)((eA - sA) * easedT);
-
-                    currentVal.data = IM_COL32(cR, cG, cB, cA);
-                }
-
-                if (anim.Apply) {
-                    anim.Apply(currentVal);
-                }
-
-                // Custom Generic Update
-                if (anim.CustomUpdate) {
-                    anim.CustomUpdate(easedT, registry, entity);
-                }
-
-                if (anim.Finished && anim.OnComplete) {
-                    anim.OnComplete();
-                }
-            }
-            
-            // Remove finished animations
-            animComp.Animations.erase(
-                std::remove_if(animComp.Animations.begin(), animComp.Animations.end(), 
-                    [](const Animation& a) { return a.Finished; }),
-                animComp.Animations.end());
-        });
+        AnimationSystem::Update(registry, deltaTime);
     }
 
     void UIRenderer::Render(entt::registry& registry) {
@@ -1267,6 +782,9 @@ namespace RenderUtils {
             // Handle Transparency
             ImU32 bgColor = style.BackgroundColor;
             ImU32 borderColor = style.BorderColor;
+            ImU32 gradientTopColor = style.GradientTopColor;
+            ImU32 gradientBottomColor = style.GradientBottomColor;
+            ImU32 outlineColor = style.OutlineColor;
             
             if (registry.any_of<TransparencyComponent>(entity)) {
                 float alpha = registry.get<TransparencyComponent>(entity).Alpha;
@@ -1281,6 +799,9 @@ namespace RenderUtils {
                     };
                     bgColor = ApplyAlpha(bgColor, alpha);
                     borderColor = ApplyAlpha(borderColor, alpha);
+                    gradientTopColor = ApplyAlpha(gradientTopColor, alpha);
+                    gradientBottomColor = ApplyAlpha(gradientBottomColor, alpha);
+                    outlineColor = ApplyAlpha(outlineColor, alpha);
                 }
             }
 
@@ -1293,12 +814,7 @@ namespace RenderUtils {
                         const auto& pTrans = registry.get<TransformComponent>(parent);
                         ImVec2 clipMin = pTrans.Position;
                         ImVec2 clipMax = ImVec2(clipMin.x + pTrans.Size.x, clipMin.y + pTrans.Size.y);
-                        
-                        // Adjust for Window Header if parent is Window
-                        if (registry.all_of<ContainerComponent>(parent) && 
-                            registry.get<ContainerComponent>(parent).Type == ContainerType::Window) {
-                            clipMin.y += 30.0f;
-                        }
+                        clipMin.y += WindowHeaderSystem::GetContentTopInset(registry, parent);
                         
                         draw_list->PushClipRect(clipMin, clipMax, true);
                         parentClipped = true;
@@ -1311,29 +827,40 @@ namespace RenderUtils {
             if (registry.any_of<ClipComponent>(entity)) {
                 const auto& clip = registry.get<ClipComponent>(entity);
                 if (clip.ClipChildren) {
-                    draw_list->PushClipRect(p_min, p_max, true);
+                    ImVec2 selfClipMin = p_min;
+                    selfClipMin.y += WindowHeaderSystem::GetContentTopInset(registry, entity);
+                    draw_list->PushClipRect(selfClipMin, p_max, true);
                     pushedClip = true;
                 }
             }
 
-            // --- Render Glow (Multi-Pass Fake Soft Shadow) ---
+            // --- Render Shadow ---
+            if (registry.any_of<ShadowComponent>(entity)) {
+                const auto& shadow = registry.get<ShadowComponent>(entity);
+                ShadowSystem::Draw(shadow, draw_list, p_min, p_max, style.Rounding, style.RoundingFlags);
+            }
+
+            // --- Render Glow ---
             if (registry.any_of<GlowComponent>(entity)) {
                 const auto& glow = registry.get<GlowComponent>(entity);
                 if (glow.Enabled && glow.Intensity > 0.0f) {
-                    // C4244 Fix: Explicit cast to float for bitwise results
-                    float r = (float)((glow.Color >> 0) & 0xFF);
-                    float g = (float)((glow.Color >> 8) & 0xFF);
-                    float b = (float)((glow.Color >> 16) & 0xFF);
-                    float a = (float)((glow.Color >> 24) & 0xFF);
-                    
-                    // Reduce base alpha based on samples to avoid over-saturation
-                    float stepAlpha = (a * glow.Intensity) / (float)glow.Samples;
-                    // Clamp
-                    if (stepAlpha > 255.0f) stepAlpha = 255.0f;
-                    
-                    for (int i = 0; i < glow.Samples; i++) {
-                        float dist = glow.Radius * ((float)(i + 1) / (float)glow.Samples);
-                        ImU32 stepColor = IM_COL32((int)r, (int)g, (int)b, (int)(stepAlpha * (1.0f - (float)i/glow.Samples)));
+                    const float r = static_cast<float>((glow.Color >> 0) & 0xFF);
+                    const float g = static_cast<float>((glow.Color >> 8) & 0xFF);
+                    const float b = static_cast<float>((glow.Color >> 16) & 0xFF);
+                    const float a = static_cast<float>((glow.Color >> 24) & 0xFF);
+                    const int sampleCount = glow.GetEffectiveSampleCount();
+                    const auto& alphaWeights = glow.GetAlphaFactors();
+
+                    float stepAlpha = (a * glow.Intensity) / static_cast<float>(sampleCount);
+                    if (stepAlpha > 255.0f) {
+                        stepAlpha = 255.0f;
+                    }
+
+                    for (int i = 0; i < sampleCount; i++) {
+                        const float t = static_cast<float>(i + 1) / static_cast<float>(sampleCount);
+                        const float dist = glow.Radius * t;
+                        const float weight = (i < static_cast<int>(alphaWeights.size())) ? alphaWeights[static_cast<size_t>(i)] : 1.0f;
+                        ImU32 stepColor = IM_COL32(static_cast<int>(r), static_cast<int>(g), static_cast<int>(b), static_cast<int>(stepAlpha * weight));
                         
                         draw_list->AddRect(
                             ImVec2(p_min.x - dist, p_min.y - dist), 
@@ -1349,25 +876,37 @@ namespace RenderUtils {
 
             // Draw Background
             if ((bgColor & IM_COL32_A_MASK) != 0) {
-                draw_list->AddRectFilled(p_min, p_max, bgColor, style.Rounding, style.RoundingFlags);
+                if (style.UseGradient) {
+                    draw_list->AddRectFilledMultiColor(
+                        p_min,
+                        p_max,
+                        gradientTopColor,
+                        gradientTopColor,
+                        gradientBottomColor,
+                        gradientBottomColor);
+                } else {
+                    draw_list->AddRectFilled(p_min, p_max, bgColor, style.Rounding, style.RoundingFlags);
+                }
             }
 
-            // Draw Custom Header for Windows
-            if (container.Type == ContainerType::Window) {
-                float headerHeight = 30.0f;
-                ImVec2 header_max = ImVec2(p_max.x, p_min.y + headerHeight);
-                ImDrawFlags headerRounding = style.RoundingFlags & ImDrawFlags_RoundCornersTop;
-                draw_list->AddRectFilled(p_min, header_max, IM_COL32(40, 40, 50, 255), style.Rounding, headerRounding);
-                if (container.Name) {
-                    draw_list->AddText(ImVec2(p_min.x + 10, p_min.y + 7), IM_COL32(255, 255, 255, 255), container.Name);
-                }
-                draw_list->AddLine(ImVec2(p_min.x, header_max.y), ImVec2(p_max.x, header_max.y), IM_COL32(0, 0, 0, 100));
-            }
+            WindowHeaderSystem::DrawHeader(registry, entity, draw_list, p_min, p_max, style.Rounding, style.RoundingFlags);
 
             // Draw Border
             if (style.BorderSize > 0.0f && (borderColor & IM_COL32_A_MASK) != 0) {
                 draw_list->AddRect(p_min, p_max, borderColor, style.Rounding, style.RoundingFlags, style.BorderSize);
             }
+            if (style.OutlineEnabled && style.OutlineThickness > 0.0f && (outlineColor & IM_COL32_A_MASK) != 0) {
+                const float inset = style.BorderSize + style.OutlineThickness * 0.5f;
+                draw_list->AddRect(
+                    ImVec2(p_min.x - inset, p_min.y - inset),
+                    ImVec2(p_max.x + inset, p_max.y + inset),
+                    outlineColor,
+                    style.Rounding + inset,
+                    style.RoundingFlags,
+                    style.OutlineThickness);
+            }
+
+            ShapeSystem::Draw(registry, entity, draw_list, p_min, p_max, true);
 
             // Debug Rendering
             if (DebugMode) {
@@ -1438,8 +977,14 @@ namespace RenderUtils {
                 bool hasContent = (!textComp.RawText.empty() || !textComp.Spans.empty());
 
                 if (hasContent) {
-                    ImVec2 text_start_pos = ImVec2(p_min.x + 10.0f, p_min.y + (container.Type == ContainerType::Window ? 40.0f : 10.0f));
-                    float availableWidth = transform.Size.x - 20.0f;
+                    const float topInset = WindowHeaderSystem::GetContentTopInset(registry, entity);
+                    ImVec2 text_start_pos = ImVec2(
+                        p_min.x + style.ContentPaddingX,
+                        p_min.y + style.ContentPaddingY + topInset);
+                    float availableWidth = transform.Size.x - style.ContentPaddingX * 2.0f;
+                    if (availableWidth < 1.0f) {
+                        availableWidth = 1.0f;
+                    }
                     
                     // Apply Scroll Offset if present on the same entity
                     if (registry.any_of<ScrollComponent>(entity)) {
@@ -1447,7 +992,10 @@ namespace RenderUtils {
                     }
 
                     if (textComp.Clip()) {
-                        draw_list->PushClipRect(p_min, p_max, true);
+                        draw_list->PushClipRect(
+                            ImVec2(p_min.x + style.ContentPaddingX, p_min.y + topInset),
+                            p_max,
+                            true);
                     }
 
                     int charIndexCounter = 0;
@@ -1515,12 +1063,14 @@ namespace RenderUtils {
                     float startX = text_start_pos.x;
                     
                     // Use shared layout logic
-                    std::vector<RenderLine> lines = CalculateLayout(textComp, availableWidth);
+                    std::vector<TextLayout::TextLayoutLine> lines = TextLayout::CalculateLayout(textComp, availableWidth);
 
                     // Update Scroll Content Height dynamically
                     if (registry.any_of<ScrollComponent>(entity)) {
                         float totalTextHeight = 0.0f;
-                        for(const auto& line : lines) totalTextHeight += line.height;
+                        for (const auto& line : lines) {
+                            totalTextHeight += line.Height;
+                        }
                         // Add some padding
                         totalTextHeight += 20.0f; 
                         registry.get<ScrollComponent>(entity).ContentHeight = totalTextHeight;
@@ -1533,28 +1083,28 @@ namespace RenderUtils {
                         float extraSpacing = 0.0f;
 
                         if (textComp.Alignment == TextAlign::Center) {
-                            xOffset = (availableWidth - line.width) * 0.5f;
+                            xOffset = (availableWidth - line.Width) * 0.5f;
                         } else if (textComp.Alignment == TextAlign::Right) {
-                            xOffset = availableWidth - line.width;
+                            xOffset = availableWidth - line.Width;
                         } else if (textComp.Alignment == TextAlign::Justify) {
                              // Only justify if not the last line
-                             if (i < lines.size() - 1 && line.spans.size() > 1) {
-                                 float totalExtra = availableWidth - line.width;
+                             if (i < lines.size() - 1 && line.Spans.size() > 1) {
+                                 float totalExtra = availableWidth - line.Width;
                                  if (totalExtra > 0) {
-                                     extraSpacing = totalExtra / (float)(line.spans.size() - 1);
+                                     extraSpacing = totalExtra / (float)(line.Spans.size() - 1);
                                  }
                              }
                         }
 
                         float currentX = startX + xOffset;
-                        for (const auto& span : line.spans) {
-                            DrawTextSpan(span.text, ImVec2(currentX, cursor.y), span.color, span.bold);
-                            currentX += span.size.x;
+                        for (const auto& span : line.Spans) {
+                            DrawTextSpan(span.Text, ImVec2(currentX, cursor.y), span.Color, span.Bold);
+                            currentX += span.Size.x;
                             if (textComp.Alignment == TextAlign::Justify) {
                                 currentX += extraSpacing;
                             }
                         }
-                        cursor.y += line.height;
+                        cursor.y += line.Height;
                     }
 
                     if (textComp.Clip()) {
@@ -1590,7 +1140,7 @@ namespace RenderUtils {
                 // In `UpdateInput`, we set `IsClicked = true` on `mouseClicked`.
                 // So passing `isClicked` is correct.
                 
-                if (custom.OnRender) {
+                if (custom.Enabled && custom.OnRender) {
                     custom.OnRender(registry, entity, draw_list, p_min, p_max, isHovered, isClicked);
                 }
             }
@@ -1598,35 +1148,40 @@ namespace RenderUtils {
             // Slider
             if (registry.any_of<SliderComponent>(entity)) {
                 auto& slider = registry.get<SliderComponent>(entity);
+                const float sliderRange = slider.Max - slider.Min;
                 
                 // Logic
                 if (slider.IsDragging) {
                     float mouseX = ImGui::GetMousePos().x;
                     float trackStart = p_min.x;
                     float trackWidth = p_max.x - p_min.x;
+                    if (trackWidth <= 0.0f) {
+                        slider.IsDragging = false;
+                    } else {
                     
-                    // Interaction Sensitivity (simple approach: just standard mapping for now, but could be scaled)
-                    // "Scroll per area" requested - usually means scaling the delta, but absolute positioning is standard for sliders.
-                    // If sensitivity != 1.0, we might need relative drag mode. 
-                    // For now, let's keep absolute mapping as it's most intuitive for standard sliders.
-                    // If user wants "sensitivity", it usually applies to infinite sliders or knobs.
-                    // We'll stick to 1:1 mapping for the bar, but maybe smooth the result.
+                        // Interaction Sensitivity (simple approach: just standard mapping for now, but could be scaled)
+                        // "Scroll per area" requested - usually means scaling the delta, but absolute positioning is standard for sliders.
+                        // If sensitivity != 1.0, we might need relative drag mode.
+                        // For now, let's keep absolute mapping as it's most intuitive for standard sliders.
+                        // If user wants "sensitivity", it usually applies to infinite sliders or knobs.
+                        // We'll stick to 1:1 mapping for the bar, but maybe smooth the result.
 
-                    float normalized = (mouseX - trackStart) / trackWidth;
-                    if (normalized < 0.0f) normalized = 0.0f;
-                    if (normalized > 1.0f) normalized = 1.0f;
-                    
-                    float newValue = slider.Min + normalized * (slider.Max - slider.Min);
-                    
-                    // Snap to Int
-                    if (slider.DataType == SliderDataType::Int) {
-                        newValue = std::round(newValue);
-                    }
+                        float normalized = (mouseX - trackStart) / trackWidth;
+                        if (normalized < 0.0f) normalized = 0.0f;
+                        if (normalized > 1.0f) normalized = 1.0f;
 
-                    if (newValue != slider.Value) {
-                        slider.Value = newValue;
-                        if (!slider.EnableSmoothing) slider.VisualValue = newValue; // Snap visual if no smoothing
-                        if (slider.OnChange) slider.OnChange(slider.Value);
+                        float newValue = slider.Min + normalized * sliderRange;
+
+                        // Snap to Int
+                        if (slider.DataType == SliderDataType::Int) {
+                            newValue = std::round(newValue);
+                        }
+
+                        if (newValue != slider.Value) {
+                            slider.Value = newValue;
+                            if (!slider.EnableSmoothing) slider.VisualValue = newValue; // Snap visual if no smoothing
+                            if (slider.OnChange) slider.OnChange(slider.Value);
+                        }
                     }
                 }
 
@@ -1652,7 +1207,10 @@ namespace RenderUtils {
                 draw_list->AddRectFilled(ImVec2(p_min.x, trackY), ImVec2(p_max.x, trackY + trackH), slider.ColorTrack, 2.0f);
                 
                 // Fill
-                float fillRatio = (slider.VisualValue - slider.Min) / (slider.Max - slider.Min);
+                float fillRatio = 0.0f;
+                if (sliderRange > 0.0f) {
+                    fillRatio = (slider.VisualValue - slider.Min) / sliderRange;
+                }
                 if (fillRatio < 0.0f) fillRatio = 0.0f;
                 if (fillRatio > 1.0f) fillRatio = 1.0f;
                 
@@ -1728,6 +1286,8 @@ namespace RenderUtils {
                 }
             }
 
+            ShapeSystem::Draw(registry, entity, draw_list, p_min, p_max, false);
+
             if (pushedClip) {
                 draw_list->PopClipRect();
             }
@@ -1739,26 +1299,8 @@ namespace RenderUtils {
             // Handle Rotation (Post-Draw Vertex Transformation)
             if (transform.Rotation != 0.0f) {
                 int vtx_idx_end = draw_list->_VtxCurrentIdx;
-                
-                // Calculate Center
                 ImVec2 center = ImVec2(p_min.x + transform.Size.x * 0.5f, p_min.y + transform.Size.y * 0.5f);
-                float s = sinf(transform.Rotation * 3.14159f / 180.0f);
-                float c = cosf(transform.Rotation * 3.14159f / 180.0f);
-
-                for (int i = vtx_idx_start; i < vtx_idx_end; i++) {
-                    ImDrawVert& v = draw_list->VtxBuffer[i];
-                    // Translate to origin
-                    float px = v.pos.x - center.x;
-                    float py = v.pos.y - center.y;
-                    
-                    // Rotate
-                    float nx = px * c - py * s;
-                    float ny = px * s + py * c;
-                    
-                    // Translate back
-                    v.pos.x = nx + center.x;
-                    v.pos.y = ny + center.y;
-                }
+                RotateVertices(draw_list, vtx_idx_start, vtx_idx_end, center, transform.Rotation);
             }
         });
 
@@ -1774,6 +1316,48 @@ namespace RenderUtils {
              // Reset for next frame
              s_HoveredDebugEntity = entt::null;
         }
+
+        // Render Images
+        auto imageView = registry.view<const Components::ImageLoader, const TransformComponent, const StyleComponent>();
+        imageView.each([draw_list](const auto& loader, const auto& transform, const auto& style) {
+            if (!style.CalculatedVisible) return;
+
+            ImVec2 p_min = transform.Position;
+            ImVec2 p_max = ImVec2(p_min.x + transform.Size.x, p_min.y + transform.Size.y);
+            int vtx_idx_start = draw_list->_VtxCurrentIdx;
+
+            if (loader.state == Components::ImageLoader::LoadState::Loaded && loader.texture) {
+                D3D12_GPU_DESCRIPTOR_HANDLE texture_handle = DX12Init::GetGpuSrvHandle((int)(intptr_t)loader.texture);
+                draw_list->AddImage((ImTextureID)texture_handle.ptr, p_min, p_max, ImVec2(0, 0), ImVec2(1, 1));
+            } else if (loader.state == Components::ImageLoader::LoadState::Loading ||
+                       loader.state == Components::ImageLoader::LoadState::Idle) {
+                draw_list->AddRectFilled(p_min, p_max, IM_COL32(55, 55, 65, 255), 6.0f);
+                draw_list->AddRect(p_min, p_max, IM_COL32(95, 95, 110, 255), 6.0f);
+                const char* loadingText = "Loading image...";
+                ImVec2 textSize = ImGui::CalcTextSize(loadingText);
+                ImVec2 textPos = ImVec2(
+                    p_min.x + (transform.Size.x - textSize.x) * 0.5f,
+                    p_min.y + (transform.Size.y - textSize.y) * 0.5f
+                );
+                draw_list->AddText(textPos, IM_COL32(210, 210, 225, 255), loadingText);
+            } else {
+                draw_list->AddRectFilled(p_min, p_max, IM_COL32(65, 35, 35, 255), 6.0f);
+                draw_list->AddRect(p_min, p_max, IM_COL32(155, 70, 70, 255), 6.0f);
+                const char* failText = "Image failed";
+                ImVec2 textSize = ImGui::CalcTextSize(failText);
+                ImVec2 textPos = ImVec2(
+                    p_min.x + (transform.Size.x - textSize.x) * 0.5f,
+                    p_min.y + (transform.Size.y - textSize.y) * 0.5f
+                );
+                draw_list->AddText(textPos, IM_COL32(245, 190, 190, 255), failText);
+            }
+
+            if (transform.Rotation != 0.0f) {
+                int vtx_idx_end = draw_list->_VtxCurrentIdx;
+                ImVec2 center = ImVec2(p_min.x + transform.Size.x * 0.5f, p_min.y + transform.Size.y * 0.5f);
+                RotateVertices(draw_list, vtx_idx_start, vtx_idx_end, center, transform.Rotation);
+            }
+        });
     }
 
     entt::entity UIRenderer::FindEntityByName(entt::registry& registry, const char* name) {
@@ -1802,42 +1386,7 @@ namespace RenderUtils {
     }
 
     std::vector<ImVec4> UIRenderer::CalculateTextLines(const TextComponent& text, const TransformComponent& transform, const ContainerComponent* container) {
-        std::vector<ImVec4> rects;
-        
-        float availableWidth = transform.Size.x - 20.0f; // Padding
-        std::vector<RenderLine> lines = CalculateLayout(text, availableWidth);
-
-        float startX = transform.Position.x + 10.0f;
-        float startY = transform.Position.y + ((container && container->Type == ContainerType::Window) ? 40.0f : 10.0f);
-        
-        float cursorY = startY;
-
-        for (size_t i = 0; i < lines.size(); ++i) {
-            const auto& line = lines[i];
-            float xOffset = 0.0f;
-            float lineWidth = line.width;
-            
-            // Calculate alignment offset
-            if (text.Alignment == TextAlign::Center) {
-                xOffset = (availableWidth - line.width) * 0.5f;
-            } else if (text.Alignment == TextAlign::Right) {
-                xOffset = availableWidth - line.width;
-            } else if (text.Alignment == TextAlign::Justify) {
-                if (i < lines.size() - 1 && line.spans.size() > 1) {
-                    if (availableWidth > line.width) {
-                        lineWidth = availableWidth;
-                    }
-                }
-            }
-            
-            // We return the bounding box of the whole line
-            // x, y, width, height
-            rects.push_back(ImVec4(startX + xOffset, cursorY, lineWidth, line.height));
-            
-            cursorY += line.height;
-        }
-        
-        return rects;
+        return TextLayout::CalculateTextLines(text, transform, container);
     }
 
     entt::entity UIRenderer::CreateContainer(entt::registry& registry, const char* name, 
@@ -1852,6 +1401,14 @@ namespace RenderUtils {
         
         return entity;
     }
+
+    // --- Image Loader Implementation ---
+
+    void UIRenderer::UpdateImageLoader(entt::registry& registry) {
+        Components::ImageLoaderSystem::Update(registry);
+    }
+
+
 
     entt::entity UIRenderer::CreateChildContainer(entt::registry& registry, entt::entity parent, const char* name,
                                                   const ImVec2& relativePos, const ImVec2& size,

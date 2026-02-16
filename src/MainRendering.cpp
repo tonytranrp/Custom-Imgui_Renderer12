@@ -4,12 +4,12 @@
 #include "Render/RenderUtils/UIRenderer.hpp"
 #include "Render/RenderUtils/UIComponents.hpp"
 #include "Render/RenderUtils/UIBuilder.hpp"
-#include "RustComponents/RustBridge.hpp"
 
 #include "imgui.h"
 #include "imgui_impl_win32.h"
 #include <tchar.h>
 #include <cassert>
+#include <cmath>
 
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
 
@@ -39,10 +39,6 @@ namespace MainRendering {
         return DefWindowProc(hWnd, msg, wParam, lParam);
     }
 
-    // State for Tabs
-    enum class TabCategory { Combat, Movement, Misc };
-    static TabCategory g_CurrentTab = TabCategory::Combat;
-
     int Run(HINSTANCE hInstance) {
         WNDCLASSEX wc = { sizeof(WNDCLASSEX), CS_CLASSDC, WndProc, 0L, 0L, GetModuleHandle(nullptr), nullptr, nullptr, nullptr, nullptr, _T("ImGui DX12 Class"), nullptr };
         RegisterClassEx(&wc);
@@ -64,7 +60,6 @@ namespace MainRendering {
 
         // --- UI Construction ---
         RenderUtils::UIBuilder::Begin(g_registry)
-            // 1. Full Screen Background
             .Create<RenderUtils::ContainerType::Panel>("MainContainer")
                 .With<RenderUtils::TransformComponent>(
                     RenderUtils::TransformComponent()
@@ -73,458 +68,345 @@ namespace MainRendering {
                 )
                 .With<RenderUtils::StyleComponent>(
                     RenderUtils::StyleComponent()
-                        .SetBackgroundColor(IM_COL32(30, 30, 30, 255))
+                        .SetBackgroundColor(IM_COL32(20, 22, 26, 255))
+                        .SetGradient(true, IM_COL32(26, 28, 34, 255), IM_COL32(14, 16, 20, 255))
                         .SetLayer(RenderUtils::ZOrder::Background)
                 )
-                .With<RenderUtils::LockedComponent>(
-                    RenderUtils::LockedComponent().SetLocked(true)
-                )
+                .With<RenderUtils::LockedComponent>(RenderUtils::LockedComponent().SetLocked(true))
             .End()
 
-            // 2. Main Cheat Window
-            .Create<RenderUtils::ContainerType::Window>("CheatClient")
+            .Create<RenderUtils::ContainerType::Window>("ShowcaseWindow")
                 .With<RenderUtils::TransformComponent>(
                     RenderUtils::TransformComponent()
-                        .SetPosition(ImVec2(100, 100))
-                        .SetSize(ImVec2(800, 500))
+                        .SetPosition(ImVec2(60, 40))
+                        .SetSize(ImVec2(1300, 780))
                 )
                 .With<RenderUtils::StyleComponent>(
                     RenderUtils::StyleComponent()
-                        .SetBackgroundColor(IM_COL32(40, 40, 45, 255))
+                        .SetBackgroundColor(IM_COL32(36, 39, 46, 255))
                         .SetBorderColor(static_cast<ImU32>(RenderUtils::ColorPreset::WindowBorder))
                         .SetBorderSize(1.0f)
                         .SetRounding(10.0f)
                         .SetLayer(RenderUtils::ZOrder::Normal)
+                        .SetOutline(true, IM_COL32(110, 160, 220, 110), 1.5f)
+                )
+                .With<RenderUtils::WindowHeaderComponent>(
+                    RenderUtils::WindowHeaderComponent()
+                        .SetHeight(34.0f)
+                        .SetPadding(12.0f, 9.0f)
+                        .SetBackgroundColor(IM_COL32(45, 49, 58, 255))
+                        .SetSeparatorColor(IM_COL32(15, 16, 20, 160))
                 )
                 .With<RenderUtils::DraggableComponent>(
                     RenderUtils::DraggableComponent().SetMode(RenderUtils::DragMode::Free)
                 )
-                // Removed Global ClipChildren to allow Icon to be visible in Header
-                // .With<RenderUtils::ClipComponent>(RenderUtils::ClipComponent().SetClipChildren(true))
+                .With<RenderUtils::ClipComponent>(RenderUtils::ClipComponent().SetClipChildren(true))
 
-
-                // --- Sidebar (Left) ---
                 .Child(
                     RenderUtils::UIBuilder::Begin(g_registry)
-                        .Create<RenderUtils::ContainerType::Panel>("Sidebar")
+                        .Create<RenderUtils::ContainerType::Panel>("ShapePanel")
                         .With<RenderUtils::TransformComponent>(
-                            RenderUtils::TransformComponent()
-                                .SetPosition(ImVec2(0, 40)) // Below Header
-                                .SetSize(ImVec2(200, 460))
+                            RenderUtils::TransformComponent().SetPosition(ImVec2(20, 55)).SetSize(ImVec2(380, 210))
                         )
                         .With<RenderUtils::StyleComponent>(
                             RenderUtils::StyleComponent()
-                                .SetBackgroundColor(IM_COL32(35, 35, 40, 255))
-                                .SetBorderColor(IM_COL32(60, 60, 60, 255))
+                                .SetBackgroundColor(IM_COL32(42, 45, 52, 255))
+                                .SetRounding(8.0f)
+                                .SetBorderColor(IM_COL32(72, 74, 90, 255))
                                 .SetBorderSize(1.0f)
+                                .SetContentPadding(14.0f, 14.0f)
                         )
-                        .With<RenderUtils::ClipComponent>(RenderUtils::ClipComponent().SetClipChildren(true))
-                        
-                        // Button: Combat
-                        .Child(
-                            RenderUtils::UIBuilder::Begin(g_registry)
-                                .Create<RenderUtils::ContainerType::Button>("BtnCombat")
-                                .With<RenderUtils::TransformComponent>(
-                                    RenderUtils::TransformComponent()
-                                        .SetPosition(ImVec2(10, 20))
-                                        .SetSize(ImVec2(180, 40))
-                                )
-                                .With<RenderUtils::StyleComponent>(
-                                    RenderUtils::StyleComponent()
-                                        .SetRounding(5.0f)
-                                        .SetBackgroundColor(IM_COL32(60, 60, 70, 255))
-                                )
-                                .IsTabTrigger((int)TabCategory::Combat)
-                                .With<RenderUtils::TextComponent>(
-                                    RenderUtils::TextComponent("Combat", IM_COL32(255, 255, 255, 255))
-                                        .Align(RenderUtils::TextAlign::Center)
-                                )
+                        .With<RenderUtils::TextComponent>(
+                            RenderUtils::TextComponent("ShapeComponent: Rect + Circle + Triangle + Polyline", IM_COL32(210, 220, 255, 255))
                         )
+                        .With<RenderUtils::ShapeComponent>(
+                            []() {
+                                RenderUtils::ShapeComponent shape;
+                                shape.SetDrawBehindContent(false).SetClipToEntity(true).SetUseForHitTest(true);
 
-                        // Button: Movement
-                        .Child(
-                            RenderUtils::UIBuilder::Begin(g_registry)
-                                .Create<RenderUtils::ContainerType::Button>("BtnMovement")
-                                .With<RenderUtils::TransformComponent>(
-                                    RenderUtils::TransformComponent()
-                                        .SetPosition(ImVec2(10, 70))
-                                        .SetSize(ImVec2(180, 40))
-                                )
-                                .With<RenderUtils::StyleComponent>(
-                                    RenderUtils::StyleComponent()
-                                        .SetRounding(5.0f)
-                                        .SetBackgroundColor(IM_COL32(60, 60, 70, 255))
-                                )
-                                .IsTabTrigger((int)TabCategory::Movement)
-                                .With<RenderUtils::TextComponent>(
-                                    RenderUtils::TextComponent("Movement", IM_COL32(255, 255, 255, 255))
-                                        .Align(RenderUtils::TextAlign::Center)
-                                )
-                        )
+                                RenderUtils::ShapePrimitive rect(RenderUtils::ShapeType::Rect);
+                                rect.Offset = ImVec2(18, 46);
+                                rect.Size = ImVec2(140, 90);
+                                rect.Rounding = 10.0f;
+                                rect.Filled = true;
+                                rect.FillColor = IM_COL32(84, 128, 220, 180);
+                                rect.StrokeEnabled = true;
+                                rect.StrokeColor = IM_COL32(160, 210, 255, 255);
+                                rect.StrokeThickness = 2.0f;
 
-                        // Button: Misc
-                        .Child(
-                            RenderUtils::UIBuilder::Begin(g_registry)
-                                .Create<RenderUtils::ContainerType::Button>("BtnMisc")
-                                .With<RenderUtils::TransformComponent>(
-                                    RenderUtils::TransformComponent()
-                                        .SetPosition(ImVec2(10, 120))
-                                        .SetSize(ImVec2(180, 40))
-                                )
-                                .With<RenderUtils::StyleComponent>(
-                                    RenderUtils::StyleComponent()
-                                        .SetRounding(5.0f)
-                                        .SetBackgroundColor(IM_COL32(60, 60, 70, 255))
-                                )
-                                .IsTabTrigger((int)TabCategory::Misc)
-                                .With<RenderUtils::TextComponent>(
-                                    RenderUtils::TextComponent("Misc", IM_COL32(255, 255, 255, 255))
-                                        .Align(RenderUtils::TextAlign::Center)
-                                )
+                                RenderUtils::ShapePrimitive circle(RenderUtils::ShapeType::Circle);
+                                circle.Offset = ImVec2(230, 86);
+                                circle.Radius = 44.0f;
+                                circle.Filled = true;
+                                circle.FillColor = IM_COL32(95, 210, 170, 170);
+                                circle.StrokeEnabled = true;
+                                circle.StrokeColor = IM_COL32(180, 255, 225, 255);
+                                circle.StrokeThickness = 2.0f;
+
+                                RenderUtils::ShapePrimitive triangle(RenderUtils::ShapeType::Triangle);
+                                triangle.Offset = ImVec2(170, 46);
+                                triangle.Points = { ImVec2(0, 82), ImVec2(48, 0), ImVec2(96, 82) };
+                                triangle.Filled = true;
+                                triangle.FillColor = IM_COL32(230, 160, 90, 180);
+                                triangle.StrokeEnabled = true;
+                                triangle.StrokeColor = IM_COL32(255, 220, 150, 255);
+                                triangle.StrokeThickness = 2.0f;
+
+                                RenderUtils::ShapePrimitive poly(RenderUtils::ShapeType::Polyline);
+                                poly.Offset = ImVec2(12, 162);
+                                poly.Points = {
+                                    ImVec2(0, 0), ImVec2(40, -20), ImVec2(80, 10), ImVec2(120, -14),
+                                    ImVec2(160, 18), ImVec2(200, -6), ImVec2(240, 12), ImVec2(300, -10)
+                                };
+                                poly.Filled = false;
+                                poly.StrokeEnabled = true;
+                                poly.StrokeColor = IM_COL32(255, 255, 255, 230);
+                                poly.StrokeThickness = 3.0f;
+
+                                shape.AddShape(rect).AddShape(circle).AddShape(triangle).AddShape(poly);
+                                return shape;
+                            }()
                         )
                 )
 
-                // --- Content Area (Right) ---
                 .Child(
                     RenderUtils::UIBuilder::Begin(g_registry)
-                        .Create<RenderUtils::ContainerType::Panel>("ContentArea")
-                        .With<RenderUtils::ClipComponent>(RenderUtils::ClipComponent().SetClipChildren(true))
+                        .Create<RenderUtils::ContainerType::Panel>("StylePanel")
                         .With<RenderUtils::TransformComponent>(
-                            RenderUtils::TransformComponent()
-                                .SetPosition(ImVec2(200, 40))
-                                .SetSize(ImVec2(600, 460))
+                            RenderUtils::TransformComponent().SetPosition(ImVec2(420, 55)).SetSize(ImVec2(380, 210))
                         )
                         .With<RenderUtils::StyleComponent>(
                             RenderUtils::StyleComponent()
-                                .SetBackgroundColor(IM_COL32(0, 0, 0, 0)) // Transparent
+                                .SetBackgroundColor(IM_COL32(44, 38, 50, 255))
+                                .SetGradient(true, IM_COL32(52, 45, 67, 255), IM_COL32(36, 32, 45, 255))
+                                .SetRounding(10.0f)
+                                .SetBorderColor(IM_COL32(104, 84, 130, 255))
+                                .SetBorderSize(1.0f)
+                                .SetOutline(true, IM_COL32(178, 134, 255, 120), 2.0f)
+                                .SetContentPadding(14.0f, 14.0f)
                         )
-                        .With<RenderUtils::ClipComponent>(RenderUtils::ClipComponent().SetClipChildren(true))
+                        .With<RenderUtils::ShadowComponent>(
+                            RenderUtils::ShadowComponent()
+                                .SetColor(IM_COL32(0, 0, 0, 120))
+                                .SetOffset(ImVec2(4, 6))
+                                .SetBlurRadius(16.0f)
+                                .SetSamples(14)
+                        )
+                        .With<RenderUtils::GlowComponent>(
+                            RenderUtils::GlowComponent(IM_COL32(198, 142, 255, 200), 12.0f, 0.75f)
+                                .SetSamples(12)
+                                .SetCacheEnabled(true)
+                                .SetMaxSamples(16)
+                        )
+                        .With<RenderUtils::TextComponent>(
+                            RenderUtils::TextComponent("Style + Shadow + Glow", IM_COL32(240, 230, 255, 255))
+                        )
+                )
 
-                        // Group: Combat
-                        .Child(
-                            RenderUtils::UIBuilder::Begin(g_registry)
-                                .Create<RenderUtils::ContainerType::Panel>("GroupCombat")
-                                .With<RenderUtils::TransformComponent>(
-                                    RenderUtils::TransformComponent().SetPosition(ImVec2(0, 0)).SetSize(ImVec2(600, 460))
-                                )
-                                .With<RenderUtils::StyleComponent>(RenderUtils::StyleComponent().SetVisible(true)) // Default Visible
-                                .IsTab((int)TabCategory::Combat)
-                                // Module: Killaura
-                                .Child(
-                                    RenderUtils::UIBuilder::Begin(g_registry)
-                                        .Create<RenderUtils::ContainerType::Panel>("ModKillaura")
-                                        .With<RenderUtils::TransformComponent>(
-                                            RenderUtils::TransformComponent().SetPosition(ImVec2(20, 20)).SetSize(ImVec2(560, 50))
-                                        )
-                                        .With<RenderUtils::StyleComponent>(
-                                            RenderUtils::StyleComponent().SetBackgroundColor(IM_COL32(50, 50, 60, 255)).SetRounding(5.0f)
-                                        )
-                                        .With<RenderUtils::TextComponent>(
-                                            RenderUtils::TextComponent("Killaura", IM_COL32(255, 200, 200, 255)).Align(RenderUtils::TextAlign::Left)
-                                        )
-                                        .With<RenderUtils::InputStateComponent>()
-                                        // Toggle Button (Custom)
-                                        .With<RenderUtils::CustomComponent>(
-                                            RenderUtils::CustomComponent().SetOnRender([](entt::registry& reg, entt::entity e, ImDrawList* dl, ImVec2 p_min, ImVec2 p_max, bool hovered, bool clicked) {
-                                                static bool enabled = false;
-                                                
-                                                // Toggle on Click
-                                                if (hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
-                                                    enabled = !enabled;
-                                                    
-                                                    // Use AnimationBuilder
-                                                    RenderUtils::AnimationBuilder builder(reg, e);
-                                                    
-                                                    if (enabled) {
-                                                        // Add Glow
-                                                        if (!reg.any_of<RenderUtils::GlowComponent>(e)) {
-                                                            reg.emplace<RenderUtils::GlowComponent>(e, IM_COL32(0, 255, 0, 0), 15.0f, 0.0f);
-                                                        }
-                                                        
-                                                        // Start Animations (Glow Pulse + Rainbow Text)
-                                                        builder
-                                                            .Loop(true)
-                                                            .Duration(2.0f)
-                                                            .Ease(RenderUtils::EasingType::Linear)
-                                                            .Custom([](float t, entt::registry& r, entt::entity ent) {
-                                                                // 1. Glow Pulse
-                                                                if (r.all_of<RenderUtils::GlowComponent>(ent)) {
-                                                                    auto& glow = r.get<RenderUtils::GlowComponent>(ent);
-                                                                    // Pulse Intensity 0.5 to 1.0
-                                                                    float pulse = 0.5f + 0.5f * sinf(t * 6.28f);
-                                                                    glow.Intensity = pulse;
-                                                                    // Color Cycle (Green)
-                                                                    glow.Color = IM_COL32(0, 255, 0, 255);
-                                                                }
+                .Child(
+                    RenderUtils::UIBuilder::Begin(g_registry)
+                        .Create<RenderUtils::ContainerType::Panel>("CustomAnimationPanel")
+                        .With<RenderUtils::TransformComponent>(
+                            RenderUtils::TransformComponent().SetPosition(ImVec2(820, 55)).SetSize(ImVec2(460, 210))
+                        )
+                        .With<RenderUtils::StyleComponent>(
+                            RenderUtils::StyleComponent()
+                                .SetBackgroundColor(IM_COL32(40, 46, 52, 255))
+                                .SetRounding(8.0f)
+                                .SetBorderColor(IM_COL32(77, 88, 98, 255))
+                                .SetBorderSize(1.0f)
+                                .SetContentPadding(14.0f, 14.0f)
+                        )
+                        .With<RenderUtils::TextComponent>(
+                            RenderUtils::TextComponent("Custom + Animation: click panel to toggle pulse", IM_COL32(220, 230, 240, 255))
+                        )
+                        .With<RenderUtils::CustomComponent>(
+                            RenderUtils::CustomComponent()
+                                .SetOnInput([](entt::registry& reg, entt::entity e, const RenderUtils::InputStateComponent& input) {
+                                    if (!input.JustPressed || !input.IsHovered) {
+                                        return;
+                                    }
 
-                                                                if (r.all_of<RenderUtils::TextComponent>(ent)) {
-                                                                    auto& tc = r.get<RenderUtils::TextComponent>(ent);
-                                                                    
-                                                                    // Per-Character Animation Callback
-                                                                    tc.CharacterTransformCallback = [t](int index, char c, ImVec2& pos, float& rotation, ImU32& color, float& scale) {
-                                                                        // 1. Rainbow Color
-                                                                        float hue = t + (float)index * 0.1f;
-                                                                        if (hue > 1.0f) hue -= 1.0f;
-                                                                        ImVec4 col = ImColor::HSV(hue, 1.0f, 1.0f);
-                                                                        color = ImColor(col);
-
-                                                                        // 2. Rotation (Spinning)
-                                                                        rotation = t * 360.0f; 
-                                                                        
-                                                                        // 3. Wave Effect (Offset Y)
-                                                                        pos.y += sinf((t * 6.28f) + (index * 0.5f)) * 5.0f;
-                                                                    };
-                                                                }
-                                                            })
-                                                            .Start();
-                                                    } else {
-                                                        // Stop/Reset
-                                                        if (reg.any_of<RenderUtils::AnimationComponent>(e)) {
-                                                            reg.remove<RenderUtils::AnimationComponent>(e);
-                                                        }
-                                                        if (reg.any_of<RenderUtils::GlowComponent>(e)) {
-                                                            reg.remove<RenderUtils::GlowComponent>(e);
-                                                        }
-                                                        if (reg.all_of<RenderUtils::TextComponent>(e)) {
-                                                            auto& tc = reg.get<RenderUtils::TextComponent>(e);
-                                                            tc.CharacterTransformCallback = nullptr; // Clear callback
-                                                            tc.Color = IM_COL32(255, 200, 200, 255); // Reset color
-                                                        }
-                                                    }
+                                    const bool enabled = reg.any_of<RenderUtils::GlowComponent>(e);
+                                    if (!enabled) {
+                                        reg.emplace_or_replace<RenderUtils::GlowComponent>(e, IM_COL32(90, 220, 255, 255), 16.0f, 0.2f);
+                                        RenderUtils::AnimationBuilder(reg, e)
+                                            .Loop(true)
+                                            .Duration(1.8f)
+                                            .Ease(RenderUtils::EasingType::EaseInOutQuad)
+                                            .Custom([](float t, entt::registry& r, entt::entity ent) {
+                                                if (r.any_of<RenderUtils::GlowComponent>(ent)) {
+                                                    auto& glow = r.get<RenderUtils::GlowComponent>(ent);
+                                                    glow.Intensity = 0.25f + 0.75f * std::fabs(std::sin(t * 6.28318f));
+                                                    glow.Color = IM_COL32(90, 220, 255, 220);
                                                 }
-                                                
-                                                // Draw Toggle Status Indicator
-                                                float radius = 6.0f;
-                                                ImVec2 center = ImVec2(p_max.x - 20, p_min.y + (p_max.y - p_min.y) * 0.5f);
-                                                dl->AddCircleFilled(center, radius, enabled ? IM_COL32(0, 255, 0, 255) : IM_COL32(255, 0, 0, 255));
                                             })
-                                        )
-                                )
-                                // Demo: Slider for HUD Scale
-                                .Child(
-                                    RenderUtils::UIBuilder::Begin(g_registry)
-                                        .Create<RenderUtils::ContainerType::Panel>("ModScale")
-                                        .With<RenderUtils::TransformComponent>(
-                                            RenderUtils::TransformComponent().SetPosition(ImVec2(20, 80)).SetSize(ImVec2(560, 50))
-                                        )
-                                        .With<RenderUtils::StyleComponent>(
-                                            RenderUtils::StyleComponent().SetBackgroundColor(IM_COL32(50, 50, 60, 255)).SetRounding(5.0f)
-                                        )
-                                        .With<RenderUtils::TextComponent>(
-                                            RenderUtils::TextComponent("HUD Scale", IM_COL32(200, 200, 255, 255)).Align(RenderUtils::TextAlign::Left)
-                                        )
-                                        .With<RenderUtils::SliderComponent>(
-                                            RenderUtils::SliderComponent(1.0f, 0.5f, 2.0f)
-                                                .SetSmoothing(true, 15.0f) // Enable smoothing
-                                                .SetColors(IM_COL32(60, 60, 70, 255), IM_COL32(100, 200, 100, 255), IM_COL32(255, 255, 255, 255))
-                                                .SetSizes(6.0f, 10.0f)
-                                                .SetOnChange([](float val) {
-                                                    // Callback
-                                                })
-                                        )
-                                        .With<RenderUtils::InputStateComponent>(RenderUtils::InputStateComponent().SetBlockInput(false))
-                                )
-                                // Demo: Text Input for Config Name
-                                .Child(
-                                    RenderUtils::UIBuilder::Begin(g_registry)
-                                        .Create<RenderUtils::ContainerType::Panel>("ModConfig")
-                                        .With<RenderUtils::TransformComponent>(
-                                            RenderUtils::TransformComponent().SetPosition(ImVec2(20, 140)).SetSize(ImVec2(560, 50))
-                                        )
-                                        .With<RenderUtils::StyleComponent>(
-                                            RenderUtils::StyleComponent().SetBackgroundColor(IM_COL32(50, 50, 60, 255)).SetRounding(5.0f)
-                                        )
-                                        .With<RenderUtils::TextComponent>(
-                                            RenderUtils::TextComponent("Config Name", IM_COL32(200, 200, 255, 255)).Align(RenderUtils::TextAlign::Left)
-                                        )
-                                        .Child(
-                                            RenderUtils::UIBuilder::Begin(g_registry)
-                                                .Create<RenderUtils::ContainerType::Panel>("InputConfig")
-                                                .With<RenderUtils::TransformComponent>(
-                                                     RenderUtils::TransformComponent().SetPosition(ImVec2(400, 10)).SetSize(ImVec2(140, 30))
-                                                )
-                                                .With<RenderUtils::TextInputComponent>(
-                                                    RenderUtils::TextInputComponent("Enter name...", 32).SetBuffer("Default")
-                                                )
-                                                .With<RenderUtils::StyleComponent>(
-                                                     RenderUtils::StyleComponent().SetRounding(3.0f)
-                                                )
-                                        )
-                                        .With<RenderUtils::InputStateComponent>(RenderUtils::InputStateComponent().SetBlockInput(false))
-                                )
+                                            .Start();
+                                    } else {
+                                        if (reg.any_of<RenderUtils::GlowComponent>(e)) {
+                                            reg.remove<RenderUtils::GlowComponent>(e);
+                                        }
+                                        if (reg.any_of<RenderUtils::AnimationComponent>(e)) {
+                                            reg.remove<RenderUtils::AnimationComponent>(e);
+                                        }
+                                    }
+                                })
+                                .SetOnRender([](entt::registry& reg, entt::entity e, ImDrawList* dl, ImVec2 pMin, ImVec2 pMax, bool hovered, bool) {
+                                    const bool enabled = reg.any_of<RenderUtils::GlowComponent>(e);
+                                    const ImU32 col = enabled ? IM_COL32(90, 220, 255, 255) : IM_COL32(140, 145, 160, 255);
+                                    dl->AddRect(ImVec2(pMin.x + 14, pMin.y + 48), ImVec2(pMax.x - 14, pMax.y - 16), col, 6.0f, 0, 1.5f);
+                                    if (hovered) {
+                                        dl->AddText(ImVec2(pMin.x + 20, pMax.y - 34), IM_COL32(255, 255, 255, 230), enabled ? "Active" : "Hover + Click");
+                                    }
+                                })
                         )
+                )
 
-                        // Group: Movement
+                .Child(
+                    RenderUtils::UIBuilder::Begin(g_registry)
+                        .Create<RenderUtils::ContainerType::Panel>("StaticImagePanel")
+                        .With<RenderUtils::TransformComponent>(
+                            RenderUtils::TransformComponent().SetPosition(ImVec2(20, 290)).SetSize(ImVec2(250, 240))
+                        )
+                        .With<RenderUtils::StyleComponent>(
+                            RenderUtils::StyleComponent()
+                                .SetBackgroundColor(IM_COL32(36, 40, 46, 255))
+                                .SetRounding(8.0f)
+                                .SetBorderColor(IM_COL32(68, 72, 82, 255))
+                                .SetBorderSize(1.0f)
+                        )
+                        .With<Components::ImageLoader>(
+                            Components::ImageLoader()
+                                .AddUrl("https://upload.wikimedia.org/wikipedia/commons/3/3f/Fronalpstock_big.jpg")
+                        )
+                )
+
+                .Child(
+                    RenderUtils::UIBuilder::Begin(g_registry)
+                        .Create<RenderUtils::ContainerType::Panel>("MultiImagePanel")
+                        .With<RenderUtils::TransformComponent>(
+                            RenderUtils::TransformComponent().SetPosition(ImVec2(290, 290)).SetSize(ImVec2(250, 240))
+                        )
+                        .With<RenderUtils::StyleComponent>(
+                            RenderUtils::StyleComponent()
+                                .SetBackgroundColor(IM_COL32(36, 40, 46, 255))
+                                .SetRounding(8.0f)
+                                .SetBorderColor(IM_COL32(68, 72, 82, 255))
+                                .SetBorderSize(1.0f)
+                        )
+                        .With<Components::ImageLoader>(
+                            []() {
+                                Components::ImageLoader loader;
+                                loader.AddUrl("https://upload.wikimedia.org/wikipedia/commons/thumb/a/a9/Example.jpg/640px-Example.jpg");
+                                loader.AddUrl("https://upload.wikimedia.org/wikipedia/commons/9/9a/Gull_portrait_ca_usa.jpg");
+                                loader.AddPath("assets/local_preview.png");
+                                loader.SetActiveSource(0);
+                                return loader;
+                            }()
+                        )
+                        .With<RenderUtils::CustomComponent>(
+                            RenderUtils::CustomComponent().SetOnInput([](entt::registry& reg, entt::entity e, const RenderUtils::InputStateComponent& input) {
+                                if (!input.JustPressed || !input.IsHovered || !reg.any_of<Components::ImageLoader>(e)) {
+                                    return;
+                                }
+                                auto& loader = reg.get<Components::ImageLoader>(e);
+                                const int count = static_cast<int>(loader.Sources.size());
+                                if (count <= 0) {
+                                    return;
+                                }
+                                loader.ActiveSourceIndex = (loader.ActiveSourceIndex + 1) % count;
+                            })
+                        )
+                )
+
+                .Child(
+                    RenderUtils::UIBuilder::Begin(g_registry)
+                        .Create<RenderUtils::ContainerType::Panel>("GifPanel")
+                        .With<RenderUtils::TransformComponent>(
+                            RenderUtils::TransformComponent().SetPosition(ImVec2(560, 290)).SetSize(ImVec2(320, 240))
+                        )
+                        .With<RenderUtils::StyleComponent>(
+                            RenderUtils::StyleComponent()
+                                .SetBackgroundColor(IM_COL32(36, 40, 46, 255))
+                                .SetRounding(8.0f)
+                                .SetBorderColor(IM_COL32(68, 72, 82, 255))
+                                .SetBorderSize(1.0f)
+                        )
+                        .With<Components::ImageLoader>(
+                            Components::ImageLoader()
+                                .AddUrl("https://media.giphy.com/media/ICOgUNjpvO0PC/giphy.gif")
+                                .SetPlayback(true, true, false, 1.0f)
+                        )
+                )
+
+                .Child(
+                    RenderUtils::UIBuilder::Begin(g_registry)
+                        .Create<RenderUtils::ContainerType::Panel>("CollisionPanel")
+                        .With<RenderUtils::TransformComponent>(
+                            RenderUtils::TransformComponent().SetPosition(ImVec2(900, 290)).SetSize(ImVec2(380, 240))
+                        )
+                        .With<RenderUtils::StyleComponent>(
+                            RenderUtils::StyleComponent()
+                                .SetBackgroundColor(IM_COL32(36, 40, 46, 255))
+                                .SetRounding(8.0f)
+                                .SetBorderColor(IM_COL32(68, 72, 82, 255))
+                                .SetBorderSize(1.0f)
+                                .SetContentPadding(10.0f, 10.0f)
+                        )
+                        .With<RenderUtils::TextComponent>(
+                            RenderUtils::TextComponent("Collision + Drag (drag boxes in debug mode)", IM_COL32(215, 225, 240, 255))
+                        )
                         .Child(
                             RenderUtils::UIBuilder::Begin(g_registry)
-                                .Create<RenderUtils::ContainerType::Panel>("GroupMovement")
+                                .Create<RenderUtils::ContainerType::Panel>("CollisionBoxA")
                                 .With<RenderUtils::TransformComponent>(
-                                    RenderUtils::TransformComponent().SetPosition(ImVec2(0, 0)).SetSize(ImVec2(600, 460))
+                                    RenderUtils::TransformComponent().SetPosition(ImVec2(20, 90)).SetSize(ImVec2(140, 90))
                                 )
-                                .With<RenderUtils::StyleComponent>(RenderUtils::StyleComponent().SetVisible(false))
-                                .IsTab((int)TabCategory::Movement)
-                                // Module: Speed
-                                .Child(
-                                    RenderUtils::UIBuilder::Begin(g_registry)
-                                        .Create<RenderUtils::ContainerType::Panel>("ModSpeed")
-                                        .With<RenderUtils::TransformComponent>(
-                                            RenderUtils::TransformComponent().SetPosition(ImVec2(20, 20)).SetSize(ImVec2(560, 50))
-                                        )
-                                        .With<RenderUtils::StyleComponent>(
-                                            RenderUtils::StyleComponent().SetBackgroundColor(IM_COL32(50, 50, 60, 255)).SetRounding(5.0f)
-                                        )
-                                        .With<RenderUtils::TextComponent>(
-                                            RenderUtils::TextComponent("Speed", IM_COL32(200, 255, 255, 255)).Align(RenderUtils::TextAlign::Left)
-                                        )
-                                        .With<RenderUtils::CustomComponent>(
-                                            RenderUtils::CustomComponent().SetOnRender([](entt::registry&, entt::entity, ImDrawList* dl, ImVec2 p_min, ImVec2 p_max, bool, bool clicked) {
-                                                static bool enabled = false;
-                                                if (clicked && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) enabled = !enabled;
-                                                
-                                                float radius = 10.0f;
-                                                ImVec2 center = ImVec2(p_max.x - 30, p_min.y + 25);
-                                                dl->AddCircleFilled(center, radius, enabled ? IM_COL32(0, 255, 0, 255) : IM_COL32(255, 0, 0, 255));
-                                                dl->AddCircle(center, radius, IM_COL32(255,255,255,255));
-                                            })
-                                        )
-                                        .With<RenderUtils::InputStateComponent>(RenderUtils::InputStateComponent().SetBlockInput(false))
+                                .With<RenderUtils::StyleComponent>(
+                                    RenderUtils::StyleComponent().SetBackgroundColor(IM_COL32(108, 170, 255, 200)).SetRounding(6.0f)
                                 )
+                                .With<RenderUtils::DraggableComponent>(
+                                    RenderUtils::DraggableComponent().SetMode(RenderUtils::DragMode::Free).SetConstraint(RenderUtils::DragConstraint::Parent)
+                                )
+                                .With<RenderUtils::CollisionComponent>(RenderUtils::CollisionComponent(true))
+                                .With<RenderUtils::TextComponent>(RenderUtils::TextComponent("Box A", IM_COL32(255, 255, 255, 255)))
                         )
-
-                        // Group: Misc
                         .Child(
                             RenderUtils::UIBuilder::Begin(g_registry)
-                                .Create<RenderUtils::ContainerType::Panel>("GroupMisc")
+                                .Create<RenderUtils::ContainerType::Panel>("CollisionBoxB")
                                 .With<RenderUtils::TransformComponent>(
-                                    RenderUtils::TransformComponent().SetPosition(ImVec2(0, 0)).SetSize(ImVec2(600, 460))
+                                    RenderUtils::TransformComponent().SetPosition(ImVec2(190, 120)).SetSize(ImVec2(140, 90))
                                 )
-                                .With<RenderUtils::StyleComponent>(RenderUtils::StyleComponent().SetVisible(false))
-                                .IsTab((int)TabCategory::Misc)
-                                // Module: Gui
-                                .Child(
-                                    RenderUtils::UIBuilder::Begin(g_registry)
-                                        .Create<RenderUtils::ContainerType::Panel>("ModGui")
-                                        .With<RenderUtils::TransformComponent>(
-                                            RenderUtils::TransformComponent().SetPosition(ImVec2(20, 20)).SetSize(ImVec2(560, 50))
-                                        )
-                                        .With<RenderUtils::StyleComponent>(
-                                            RenderUtils::StyleComponent().SetBackgroundColor(IM_COL32(50, 50, 60, 255)).SetRounding(5.0f)
-                                        )
-                                        .With<RenderUtils::TextComponent>(
-                                            RenderUtils::TextComponent("Gui", IM_COL32(255, 255, 200, 255)).Align(RenderUtils::TextAlign::Left)
-                                        )
-                                        .With<RenderUtils::CustomComponent>(
-                                            RenderUtils::CustomComponent().SetOnRender([](entt::registry&, entt::entity, ImDrawList* dl, ImVec2 p_min, ImVec2 p_max, bool, bool clicked) {
-                                                static bool enabled = true; // Default ON
-                                                if (clicked && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) enabled = !enabled;
-                                                
-                                                float radius = 10.0f;
-                                                ImVec2 center = ImVec2(p_max.x - 30, p_min.y + 25);
-                                                dl->AddCircleFilled(center, radius, enabled ? IM_COL32(0, 255, 0, 255) : IM_COL32(255, 0, 0, 255));
-                                                dl->AddCircle(center, radius, IM_COL32(255,255,255,255));
-                                            })
-                                        )
-                                        .With<RenderUtils::InputStateComponent>(RenderUtils::InputStateComponent().SetBlockInput(false))
+                                .With<RenderUtils::StyleComponent>(
+                                    RenderUtils::StyleComponent().SetBackgroundColor(IM_COL32(255, 154, 112, 200)).SetRounding(6.0f)
                                 )
+                                .With<RenderUtils::DraggableComponent>(
+                                    RenderUtils::DraggableComponent().SetMode(RenderUtils::DragMode::Free).SetConstraint(RenderUtils::DragConstraint::Parent)
+                                )
+                                .With<RenderUtils::CollisionComponent>(RenderUtils::CollisionComponent(true))
+                                .With<RenderUtils::TextComponent>(RenderUtils::TextComponent("Box B", IM_COL32(255, 255, 255, 255)))
                         )
                 )
             .End()
 
-            // 3. Settings Window (Kept as requested)
-            .Create<RenderUtils::ContainerType::Window>("Settings")
+            .Create<RenderUtils::ContainerType::Window>("HeaderlessPreview")
                 .With<RenderUtils::TransformComponent>(
-                    RenderUtils::TransformComponent()
-                        .SetPosition(ImVec2(800, 50))
-                        .SetSize(ImVec2(300, 400))
+                    RenderUtils::TransformComponent().SetPosition(ImVec2(1380, 120)).SetSize(ImVec2(190, 220))
                 )
                 .With<RenderUtils::StyleComponent>(
                     RenderUtils::StyleComponent()
-                        .SetBackgroundColor(IM_COL32(35, 35, 40, 255))
-                        .SetBorderColor(static_cast<ImU32>(RenderUtils::ColorPreset::WindowBorder))
-                        .SetBorderSize(1.0f)
+                        .SetBackgroundColor(IM_COL32(44, 48, 58, 255))
                         .SetRounding(8.0f)
-                        .SetLayer(RenderUtils::ZOrder::Top) // Always on top
+                        .SetBorderColor(IM_COL32(88, 96, 110, 255))
+                        .SetBorderSize(1.0f)
+                        .SetLayer(RenderUtils::ZOrder::Top)
                 )
-                .With<RenderUtils::DraggableComponent>(
-                    RenderUtils::DraggableComponent().SetMode(RenderUtils::DragMode::Free)
-                )
-                
-                // Opacity Slider
-                .Child(
-                    RenderUtils::UIBuilder::Begin(g_registry)
-                        .Create<RenderUtils::ContainerType::Panel>("OpacityControl")
-                        .With<RenderUtils::TransformComponent>(
-                            RenderUtils::TransformComponent()
-                                .SetPosition(ImVec2(20, 50))
-                                .SetSize(ImVec2(260, 60))
-                        )
-                        .With<RenderUtils::TextComponent>(
-                            RenderUtils::TextComponent("Window Opacity", IM_COL32(200, 200, 200, 255))
-                        )
-                        .With<RenderUtils::SliderComponent>(
-                            RenderUtils::SliderComponent(1.0f, 0.1f, 1.0f)
-                                .SetOnChange([](float val) {
-                                    // Find the Main Window and update transparency
-                                    auto target = RenderUtils::UIRenderer::FindEntityByName(g_registry, "Rich Text Demo");
-                                    if (g_registry.valid(target)) {
-                                        if (g_registry.any_of<RenderUtils::TransparencyComponent>(target)) {
-                                            g_registry.get<RenderUtils::TransparencyComponent>(target).Alpha = val;
-                                        }
-                                    }
-                                })
-                        )
-                )
-
-                // Expandable Info Section
-                .Child(
-                    RenderUtils::UIBuilder::Begin(g_registry)
-                        .Create<RenderUtils::ContainerType::Panel>("InfoSection")
-                        .With<RenderUtils::TransformComponent>(
-                            RenderUtils::TransformComponent()
-                                .SetPosition(ImVec2(20, 130))
-                                .SetSize(ImVec2(260, 40)) // Initial small size
-                        )
-                        .With<RenderUtils::StyleComponent>(
-                            RenderUtils::StyleComponent()
-                                .SetBackgroundColor(IM_COL32(50, 50, 60, 255))
-                                .SetRounding(4.0f)
-                        )
-                        .With<RenderUtils::ExpandComponent>(
-                            RenderUtils::ExpandComponent()
-                                .SetExpanded(false)
-                                .SetExpandedHeight(150.0f)
-                        )
-                        .With<RenderUtils::TextComponent>(
-                            RenderUtils::TextComponent("Click to Expand Info...", IM_COL32(255, 255, 100, 255))
-                                .Align(RenderUtils::TextAlign::Center)
-                        )
-                        // Click handler to toggle expand
-                        .With<RenderUtils::CustomComponent>(
-                            RenderUtils::CustomComponent()
-                                .SetOnRender([](entt::registry& reg, entt::entity e, ImDrawList*, const ImVec2&, const ImVec2&, bool hovered, bool clicked) {
-                                    if (clicked && reg.any_of<RenderUtils::ExpandComponent>(e)) {
-                                        auto& exp = reg.get<RenderUtils::ExpandComponent>(e);
-                                        // Simple toggle with debounce (naive)
-                                        // In real app, check mouse released. But here we rely on UIRenderer handling clicked state per frame.
-                                        // Since UIRenderer sets Clicked=true only on first frame of click usually?
-                                        // Actually UIRenderer sets IsClicked = true while mouse is down.
-                                        // We need "Just Clicked".
-                                        // For now, let's assume user holds it. This might flicker.
-                                        // Better: Use ImGui::IsMouseClicked inside here?
-                                        if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
-                                            exp.IsExpanded = !exp.IsExpanded;
-                                            // Update size
-                                            if (reg.all_of<RenderUtils::TransformComponent>(e)) {
-                                                auto& t = reg.get<RenderUtils::TransformComponent>(e);
-                                                t.Size.y = exp.IsExpanded ? exp.ExpandedHeight : 40.0f;
-                                            }
-                                        }
-                                    }
-                                })
-                        )
+                .With<RenderUtils::WindowHeaderComponent>(RenderUtils::WindowHeaderComponent().SetEnabled(false))
+                .With<RenderUtils::DraggableComponent>(RenderUtils::DraggableComponent().SetMode(RenderUtils::DragMode::Free))
+                .With<RenderUtils::TextComponent>(
+                    RenderUtils::TextComponent("Header disabled via WindowHeaderComponent", IM_COL32(230, 235, 245, 255))
                 )
             .End();
-
         // ------------------------------------------------
 
         bool done = false;
@@ -539,7 +421,7 @@ namespace MainRendering {
             if (done) break;
 
             // --- 1. Begin Frame & Open Command List ---
-            // We must open the command list BEFORE UIRenderer::Render because ImageLoader might need to record upload commands.
+            // We must open the command list BEFORE UIRenderer::Update because ImageLoaderSystem may record upload commands.
             FrameContext* frameCtx = DX12Init::WaitForNextFrameResources();
             UINT backBufferIdx = DX12Init::g_pSwapChain->GetCurrentBackBufferIndex();
             frameCtx->CommandAllocator->Reset();
@@ -559,19 +441,10 @@ namespace MainRendering {
                 });
             }
 
-            // --- Logic for Tabs ---
-            // Update visibility of groups based on g_CurrentTab
-            // Use TabSwitchComponent to manage visibility automatically
-            // auto tabView = g_registry.view<RenderUtils::TabSwitchComponent, RenderUtils::StyleComponent>();
-            // ... (Removed manual logic) ...
-
-            // Update Sidebar Button Colors (Highlight Active)
-            // ... (Removed manual logic) ...
-
             // Update Library Systems
             RenderUtils::UIRenderer::Update(g_registry, 1.0f / io.Framerate);
 
-            // Render Custom UI (This might trigger texture uploads using g_pd3dCommandList)
+            // Render Custom UI
             RenderUtils::UIRenderer::Render(g_registry);
 
             // Render Inspector if Debug Mode is on
@@ -632,6 +505,7 @@ namespace MainRendering {
         }
 
         DX12Init::WaitForLastSubmittedFrame();
+        Components::ImageLoaderSystem::Shutdown(g_registry);
         ImguiRender::Cleanup();
         DX12Init::CleanupDeviceD3D();
         DestroyWindow(hWnd);
@@ -640,3 +514,4 @@ namespace MainRendering {
         return 0;
     }
 }
+

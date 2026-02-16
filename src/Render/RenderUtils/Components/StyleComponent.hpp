@@ -38,9 +38,33 @@ namespace RenderUtils {
         ZOrder Layer; // Renamed from ZIndex and changed type
         int ZIndexInt; // Cached int value for sorting if needed, or just cast Layer
         bool CalculatedVisible; // Internal: Is this entity effectively visible (considering parents)?
+        bool UseGradient;
+        ImU32 GradientTopColor;
+        ImU32 GradientBottomColor;
+        bool OutlineEnabled;
+        ImU32 OutlineColor;
+        float OutlineThickness;
+        float ContentPaddingX;
+        float ContentPaddingY;
 
         StyleComponent(ImU32 bg = 0, ImU32 border = 0, float borderSize = 0.0f, float rounding = 0.0f, bool visible = true, ZOrder layer = ZOrder::Normal, ImDrawFlags roundingFlags = ImDrawFlags_RoundCornersAll)
-            : BackgroundColor(bg), BorderColor(border), BorderSize(borderSize), Rounding(rounding), Visible(visible), Layer(layer), ZIndexInt(static_cast<int>(layer)), RoundingFlags(roundingFlags), CalculatedVisible(visible) {}
+            : BackgroundColor(bg),
+              BorderColor(border),
+              BorderSize(borderSize),
+              Rounding(rounding),
+              RoundingFlags(roundingFlags),
+              Visible(visible),
+              Layer(layer),
+              ZIndexInt(static_cast<int>(layer)),
+              CalculatedVisible(visible),
+              UseGradient(false),
+              GradientTopColor(bg),
+              GradientBottomColor(bg),
+              OutlineEnabled(false),
+              OutlineColor(IM_COL32(255, 255, 255, 0)),
+              OutlineThickness(1.0f),
+              ContentPaddingX(10.0f),
+              ContentPaddingY(10.0f) {}
 
         StyleComponent& SetBackgroundColor(ImU32 color) { BackgroundColor = color; return *this; }
         StyleComponent& SetBorderColor(ImU32 color) { BorderColor = color; return *this; }
@@ -52,6 +76,37 @@ namespace RenderUtils {
             Layer = layer; 
             ZIndexInt = static_cast<int>(layer); 
             return *this; 
+        }
+        StyleComponent& SetGradient(bool enabled, ImU32 topColor = 0, ImU32 bottomColor = 0) {
+            UseGradient = enabled;
+            if (topColor != 0) {
+                GradientTopColor = topColor;
+            } else {
+                GradientTopColor = BackgroundColor;
+            }
+            if (bottomColor != 0) {
+                GradientBottomColor = bottomColor;
+            } else {
+                GradientBottomColor = BackgroundColor;
+            }
+            return *this;
+        }
+        StyleComponent& SetGradientTopColor(ImU32 color) { GradientTopColor = color; return *this; }
+        StyleComponent& SetGradientBottomColor(ImU32 color) { GradientBottomColor = color; return *this; }
+        StyleComponent& SetOutline(bool enabled, ImU32 color = 0, float thickness = 1.0f) {
+            OutlineEnabled = enabled;
+            if (color != 0) {
+                OutlineColor = color;
+            }
+            OutlineThickness = thickness;
+            return *this;
+        }
+        StyleComponent& SetOutlineColor(ImU32 color) { OutlineColor = color; return *this; }
+        StyleComponent& SetOutlineThickness(float thickness) { OutlineThickness = thickness; return *this; }
+        StyleComponent& SetContentPadding(float x, float y) {
+            ContentPaddingX = x;
+            ContentPaddingY = y;
+            return *this;
         }
     };
 }

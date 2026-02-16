@@ -69,5 +69,8 @@ namespace RenderUtils {
         static int s_CurrentTabId;
         static entt::entity s_SelectedEntity; // For Debug Inspector
         static entt::entity s_HoveredDebugEntity;
+
+        // Image Loader
+        static void UpdateImageLoader(entt::registry& registry);
     };
 }

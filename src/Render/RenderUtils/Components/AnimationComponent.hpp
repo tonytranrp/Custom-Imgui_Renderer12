@@ -1,8 +1,13 @@
 #pragma once
 #include "imgui.h"
+#include "entt/entt.hpp"
+#include <algorithm>
+#include <atomic>
 #include <vector>
 #include <functional>
 #include <cmath>
+#include <string>
+#include <utility>
 #include <variant>
 
 namespace RenderUtils {
@@ -20,12 +25,13 @@ namespace RenderUtils {
     };
 
     struct AnimationValue {
-        std::variant<float, ImVec2, ImU32> data;
+        std::variant<float, int, ImVec2, ImVec4, ImU32> data;
     };
 
     struct Animation {
         // Unique ID for the animation (optional, for cancellation)
         int ID;
+        std::string Tag;
         
         // Duration and Timing
         float Duration;
@@ -60,7 +66,38 @@ namespace RenderUtils {
         AnimationComponent() {}
 
         void AddAnimation(const Animation& anim) {
-            Animations.push_back(anim);
+            AddAnimationEx(anim);
+        }
+
+        int AddAnimationEx(Animation anim) {
+            static std::atomic<int> s_NextAnimationId{ 1 };
+            if (anim.ID <= 0) {
+                anim.ID = s_NextAnimationId.fetch_add(1, std::memory_order_relaxed);
+            }
+            Animations.push_back(std::move(anim));
+            return Animations.back().ID;
+        }
+
+        bool CancelById(int id) {
+            auto it = std::remove_if(Animations.begin(), Animations.end(), [id](const Animation& anim) {
+                return anim.ID == id;
+            });
+            const bool removed = it != Animations.end();
+            Animations.erase(it, Animations.end());
+            return removed;
+        }
+
+        size_t CancelByTag(const std::string& tag) {
+            auto it = std::remove_if(Animations.begin(), Animations.end(), [&tag](const Animation& anim) {
+                return anim.Tag == tag;
+            });
+            const size_t removed = static_cast<size_t>(Animations.end() - it);
+            Animations.erase(it, Animations.end());
+            return removed;
+        }
+
+        void ClearAll() {
+            Animations.clear();
         }
     };
 
@@ -100,4 +137,136 @@ namespace RenderUtils {
             }
         }
     };
+
+    namespace AnimationSystem {
+        namespace detail {
+            inline ImU32 LerpColor(ImU32 start, ImU32 end, float t) {
+                const int sR = (start >> 0) & 0xFF;
+                const int sG = (start >> 8) & 0xFF;
+                const int sB = (start >> 16) & 0xFF;
+                const int sA = (start >> 24) & 0xFF;
+
+                const int eR = (end >> 0) & 0xFF;
+                const int eG = (end >> 8) & 0xFF;
+                const int eB = (end >> 16) & 0xFF;
+                const int eA = (end >> 24) & 0xFF;
+
+                const int cR = sR + static_cast<int>((eR - sR) * t);
+                const int cG = sG + static_cast<int>((eG - sG) * t);
+                const int cB = sB + static_cast<int>((eB - sB) * t);
+                const int cA = sA + static_cast<int>((eA - sA) * t);
+                return IM_COL32(cR, cG, cB, cA);
+            }
+
+            inline bool InterpolateValue(const AnimationValue& start, const AnimationValue& end, float t, AnimationValue& outValue) {
+                if (const auto* startFloat = std::get_if<float>(&start.data)) {
+                    if (const auto* endFloat = std::get_if<float>(&end.data)) {
+                        outValue.data = *startFloat + (*endFloat - *startFloat) * t;
+                        return true;
+                    }
+                }
+
+                if (const auto* startInt = std::get_if<int>(&start.data)) {
+                    if (const auto* endInt = std::get_if<int>(&end.data)) {
+                        const float current = static_cast<float>(*startInt) + (static_cast<float>(*endInt - *startInt) * t);
+                        outValue.data = static_cast<int>(std::round(current));
+                        return true;
+                    }
+                }
+
+                if (const auto* startVec2 = std::get_if<ImVec2>(&start.data)) {
+                    if (const auto* endVec2 = std::get_if<ImVec2>(&end.data)) {
+                        outValue.data = ImVec2(
+                            startVec2->x + (endVec2->x - startVec2->x) * t,
+                            startVec2->y + (endVec2->y - startVec2->y) * t
+                        );
+                        return true;
+                    }
+                }
+
+                if (const auto* startVec4 = std::get_if<ImVec4>(&start.data)) {
+                    if (const auto* endVec4 = std::get_if<ImVec4>(&end.data)) {
+                        outValue.data = ImVec4(
+                            startVec4->x + (endVec4->x - startVec4->x) * t,
+                            startVec4->y + (endVec4->y - startVec4->y) * t,
+                            startVec4->z + (endVec4->z - startVec4->z) * t,
+                            startVec4->w + (endVec4->w - startVec4->w) * t
+                        );
+                        return true;
+                    }
+                }
+
+                if (const auto* startColor = std::get_if<ImU32>(&start.data)) {
+                    if (const auto* endColor = std::get_if<ImU32>(&end.data)) {
+                        outValue.data = LerpColor(*startColor, *endColor, t);
+                        return true;
+                    }
+                }
+
+                return false;
+            }
+        } // namespace detail
+
+        inline void Update(entt::registry& registry, float deltaTime) {
+            auto view = registry.view<AnimationComponent>();
+            view.each([deltaTime, &registry](const auto entity, auto& animComp) {
+                for (auto& anim : animComp.Animations) {
+                    if (anim.Finished) {
+                        continue;
+                    }
+
+                    const float duration = anim.Duration;
+                    float t = 1.0f;
+                    if (duration > 0.0f) {
+                        anim.Elapsed += deltaTime;
+                        t = anim.Elapsed / duration;
+                    } else {
+                        anim.Elapsed = duration;
+                    }
+
+                    if (t >= 1.0f) {
+                        if (anim.Loop) {
+                            if (duration > 0.0f) {
+                                anim.Elapsed = std::fmod(anim.Elapsed, duration);
+                                if (anim.Elapsed < 0.0f) {
+                                    anim.Elapsed = 0.0f;
+                                }
+                                t = anim.Elapsed / duration;
+                            } else {
+                                t = 0.0f;
+                            }
+                        } else {
+                            t = 1.0f;
+                            anim.Finished = true;
+                        }
+                    } else if (t < 0.0f) {
+                        t = 0.0f;
+                    }
+
+                    const float easedT = Easing::Apply(t, anim.Easing);
+                    AnimationValue currentVal = anim.StartVal;
+                    if (!detail::InterpolateValue(anim.StartVal, anim.EndVal, easedT, currentVal)) {
+                        currentVal = (anim.Finished ? anim.EndVal : anim.StartVal);
+                    }
+
+                    if (anim.Apply) {
+                        anim.Apply(currentVal);
+                    }
+
+                    if (anim.CustomUpdate) {
+                        anim.CustomUpdate(easedT, registry, entity);
+                    }
+
+                    if (anim.Finished && anim.OnComplete) {
+                        anim.OnComplete();
+                    }
+                }
+
+                animComp.Animations.erase(
+                    std::remove_if(animComp.Animations.begin(), animComp.Animations.end(),
+                        [](const Animation& animation) { return animation.Finished; }),
+                    animComp.Animations.end());
+            });
+        }
+    } // namespace AnimationSystem
 }

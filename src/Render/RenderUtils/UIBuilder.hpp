@@ -3,6 +3,9 @@
 #include "UIRenderer.hpp"
 #include "UIComponents.hpp" // Now includes all component headers
 #include "entt/entt.hpp"
+#include <cassert>
+#include <type_traits>
+#include <utility>
 
 namespace RenderUtils {
 
@@ -97,8 +100,14 @@ namespace RenderUtils {
             entt::entity entity = m_Registry.create();
             m_Registry.emplace<TransformComponent>(entity); // Default
             m_Registry.emplace<StyleComponent>(entity);     // Default
-            m_Registry.emplace<ContainerComponent>(entity, Type, name);
+            const char* safeName = name ? name : "";
+            m_Registry.emplace<ContainerComponent>(entity, Type, safeName);
             m_Registry.emplace<InputStateComponent>(entity);
+            if constexpr (Type == ContainerType::Window) {
+                if (!m_Registry.any_of<WindowHeaderComponent>(entity)) {
+                    m_Registry.emplace<WindowHeaderComponent>(entity);
+                }
+            }
             // Draggable defaults to false, Collision defaults to false (not added)
             
             return UIBuilder(m_Registry, entity);
@@ -146,7 +155,13 @@ namespace RenderUtils {
         
         UIBuilder& Child(const UIBuilder& childBuilder) {
             // ... (existing implementation)
-            if (m_Entity != entt::null && childBuilder.m_Entity != entt::null) {
+            if (&m_Registry != &childBuilder.m_Registry) {
+                assert(false && "UIBuilder::Child called with builders from different registries");
+                return *this;
+            }
+
+            if (m_Entity != entt::null && childBuilder.m_Entity != entt::null &&
+                m_Registry.valid(m_Entity) && m_Registry.valid(childBuilder.m_Entity)) {
                 auto& pc = m_Registry.emplace_or_replace<ParentComponent>(childBuilder.m_Entity);
                 pc.ParentEntity = m_Entity;
                 
@@ -167,6 +182,21 @@ namespace RenderUtils {
                 }
             }
             return *this;
+        }
+
+        // Ergonomic child builder overload:
+        // .Child<ContainerType::Panel>("MyChild", [](UIBuilder& child){ ... })
+        template <ContainerType Type, typename Fn>
+        UIBuilder& Child(const char* name, Fn&& configure) {
+            static_assert(std::is_invocable_v<Fn, UIBuilder&>, "UIBuilder::Child configure callback must accept UIBuilder&");
+            if (m_Entity == entt::null || !m_Registry.valid(m_Entity)) {
+                return *this;
+            }
+
+            UIBuilder child = UIBuilder::Begin(m_Registry).Create<Type>(name);
+            std::forward<Fn>(configure)(child);
+            child.End();
+            return Child(child);
         }
 
         // Add Animation (Fluent API)
