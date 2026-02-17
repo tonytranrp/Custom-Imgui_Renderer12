@@ -170,13 +170,14 @@ if(imgui_ADDED)
     target_link_libraries(imgui_backends PUBLIC imgui)
 endif()
 
-add_executable(ImGuiDX12App
-    src/main.cpp
-    src/MainRendering.cpp
-    src/MainRendering.hpp
+set(IMGUI_DX12APP_SHARED_RUNTIME_SOURCES
+    src/Scene/ShowcaseRuntime.cpp
+    src/Scene/ShowcaseRuntime.hpp
     src/Dx12Init/Dx12Init.cpp
     src/Dx12Init/Dx12Init.hpp
     src/Dx12Init/Dx12Helper.cpp
+    src/Dx12Init/ExternalOverlayRuntime.cpp
+    src/Dx12Init/ExternalOverlayRuntime.hpp
     src/Render/ImguiRender.cpp
     src/Render/ImguiRender.hpp
     src/Render/RenderUtils/UIRenderer.cpp
@@ -187,20 +188,28 @@ add_executable(ImGuiDX12App
     src/Render/RenderUtils/ShaderSystem.hpp
     src/Render/RenderUtils/UIComponents.hpp
 )
+set(IMGUI_DX12APP_EXE_ONLY_SOURCES
+    src/MainRendering.cpp
+    src/MainRendering.hpp
+    src/main.cpp
+)
+set(IMGUI_DX12APP_TESTHOOK_ONLY_SOURCES
+    Test/InjectedDx12/DllMain.cpp
+    Test/InjectedDx12/DirectX12HookRuntime.cpp
+    Test/InjectedDx12/DirectX12HookRuntime.hpp
+)
 
-# Embed shipped shaders at compile time (no runtime asset copy required).
-b_embed(ImGuiDX12App assets/shaders/ui_shader_shared.hlsli)
-b_embed(ImGuiDX12App assets/shaders/ui_default_vs.hlsl)
-b_embed(ImGuiDX12App assets/shaders/glow_default.hlsl)
-b_embed(ImGuiDX12App assets/shaders/shadow_default.hlsl)
+list(TRANSFORM IMGUI_DX12APP_SHARED_RUNTIME_SOURCES PREPEND "${CMAKE_SOURCE_DIR}/")
+list(TRANSFORM IMGUI_DX12APP_EXE_ONLY_SOURCES PREPEND "${CMAKE_SOURCE_DIR}/")
+list(TRANSFORM IMGUI_DX12APP_TESTHOOK_ONLY_SOURCES PREPEND "${CMAKE_SOURCE_DIR}/")
 
-target_link_libraries(ImGuiDX12App PRIVATE 
-    imgui 
+set(IMGUI_DX12APP_BASE_LINK_LIBS
+    imgui
     imgui_backends
     EnTT::EnTT
     rust_components
-    d3d12.lib 
-    dxgi.lib 
+    d3d12.lib
+    dxgi.lib
     d3dcompiler.lib
     dxguid.lib
     ws2_32.lib
@@ -209,66 +218,119 @@ target_link_libraries(ImGuiDX12App PRIVATE
     $<$<CONFIG:Debug>:msvcrtd.lib>
 )
 
-target_include_directories(ImGuiDX12App PRIVATE src)
+option(IMGUI_DX12APP_WARNINGS_AS_ERRORS "Treat project warnings as errors for first-party targets" ON)
+option(IMGUI_DX12APP_ULTRA_WARNING_PROFILE "Enable ultra-strict first-party warning profile" ON)
+option(IMGUI_DX12APP_BUILD_TEST_DLL "Build optional DX12 injected test hook DLL target" OFF)
 
-option(IMGUI_DX12APP_WARNINGS_AS_ERRORS "Treat project warnings as errors for ImGuiDX12App" ON)
-option(IMGUI_DX12APP_ULTRA_WARNING_PROFILE "Enable ultra-strict first-party warning profile for ImGuiDX12App" ON)
-if(MSVC)
-    target_compile_options(ImGuiDX12App PRIVATE /W4 /permissive-)
-    if(IMGUI_DX12APP_ULTRA_WARNING_PROFILE)
-        target_compile_options(ImGuiDX12App PRIVATE
-            /sdl
-            /Zc:preprocessor
-            /Zc:__cplusplus
-            /external:anglebrackets
-            /external:W0
-            /w14242
-            /w14254
-            /w14263
-            /w14265
-            /w14287
-            /we4289
-            /w14296
-            /w14311
-            /w14545
-            /w14546
-            /w14547
-            /w14549
-            /w14555
-            /w14619
-            /w14640
-            /w14826
-            /w14905
-            /w14906
-            /w14928
+function(imdx12_apply_warning_profile target_name)
+    if(MSVC)
+        target_compile_options(${target_name} PRIVATE /W4 /permissive-)
+        if(IMGUI_DX12APP_ULTRA_WARNING_PROFILE)
+            target_compile_options(${target_name} PRIVATE
+                /sdl
+                /Zc:preprocessor
+                /Zc:__cplusplus
+                /external:anglebrackets
+                /external:W0
+                /w14242
+                /w14254
+                /w14263
+                /w14265
+                /w14287
+                /we4289
+                /w14296
+                /w14311
+                /w14545
+                /w14546
+                /w14547
+                /w14549
+                /w14555
+                /w14619
+                /w14640
+                /w14826
+                /w14905
+                /w14906
+                /w14928
+            )
+        endif()
+        target_compile_options(${target_name} PRIVATE
+            $<$<CONFIG:Release>:/O2 /Oi /Ot /Gy /Gw /GF /Zc:inline>
+            $<$<CONFIG:RelWithDebInfo>:/O2 /Oi /Ot /Gy /Gw /GF /Zc:inline>
+            $<$<CONFIG:MinSizeRel>:/O2 /Oi /Ot /Gy /Gw /GF /Zc:inline>
         )
-    endif()
-    target_compile_options(ImGuiDX12App PRIVATE
-        $<$<CONFIG:Release>:/O2 /Oi /Ot /Gy /Gw /GF /Zc:inline>
-        $<$<CONFIG:RelWithDebInfo>:/O2 /Oi /Ot /Gy /Gw /GF /Zc:inline>
-        $<$<CONFIG:MinSizeRel>:/O2 /Oi /Ot /Gy /Gw /GF /Zc:inline>
-    )
-    target_link_options(ImGuiDX12App PRIVATE
-        $<$<CONFIG:Release>:/OPT:REF /OPT:ICF /INCREMENTAL:NO>
-        $<$<CONFIG:RelWithDebInfo>:/OPT:REF /OPT:ICF /INCREMENTAL:NO>
-        $<$<CONFIG:MinSizeRel>:/OPT:REF /OPT:ICF /INCREMENTAL:NO>
-    )
-    if(IMGUI_DX12APP_WARNINGS_AS_ERRORS)
-        target_compile_options(ImGuiDX12App PRIVATE /WX)
-    endif()
-else()
-    target_compile_options(ImGuiDX12App PRIVATE -Wall -Wextra -Wpedantic)
-    if(IMGUI_DX12APP_ULTRA_WARNING_PROFILE)
-        target_compile_options(ImGuiDX12App PRIVATE
-            -Wconversion
-            -Wsign-conversion
-            -Wshadow
-            -Wformat=2
-            -Wnull-dereference
-            -Wimplicit-fallthrough
+        target_link_options(${target_name} PRIVATE
+            $<$<CONFIG:Release>:/OPT:REF /OPT:ICF /INCREMENTAL:NO>
+            $<$<CONFIG:RelWithDebInfo>:/OPT:REF /OPT:ICF /INCREMENTAL:NO>
+            $<$<CONFIG:MinSizeRel>:/OPT:REF /OPT:ICF /INCREMENTAL:NO>
         )
+        if(IMGUI_DX12APP_WARNINGS_AS_ERRORS)
+            target_compile_options(${target_name} PRIVATE /WX)
+        endif()
+    else()
+        target_compile_options(${target_name} PRIVATE -Wall -Wextra -Wpedantic)
+        if(IMGUI_DX12APP_ULTRA_WARNING_PROFILE)
+            target_compile_options(${target_name} PRIVATE
+                -Wconversion
+                -Wsign-conversion
+                -Wshadow
+                -Wformat=2
+                -Wnull-dereference
+                -Wimplicit-fallthrough
+            )
+        endif()
+        if(IMGUI_DX12APP_WARNINGS_AS_ERRORS)
+            target_compile_options(${target_name} PRIVATE -Werror)
+        endif()
     endif()
-    if(IMGUI_DX12APP_WARNINGS_AS_ERRORS)
-        target_compile_options(ImGuiDX12App PRIVATE -Werror)
+endfunction()
+
+add_executable(ImGuiDX12App
+    ${IMGUI_DX12APP_SHARED_RUNTIME_SOURCES}
+    ${IMGUI_DX12APP_EXE_ONLY_SOURCES}
+)
+
+# Embed shipped shaders at compile time (no runtime asset copy required).
+b_embed(ImGuiDX12App assets/shaders/ui_shader_shared.hlsli)
+b_embed(ImGuiDX12App assets/shaders/ui_default_vs.hlsl)
+b_embed(ImGuiDX12App assets/shaders/glow_default.hlsl)
+b_embed(ImGuiDX12App assets/shaders/shadow_default.hlsl)
+
+target_link_libraries(ImGuiDX12App PRIVATE ${IMGUI_DX12APP_BASE_LINK_LIBS})
+
+target_include_directories(ImGuiDX12App PRIVATE src)
+imdx12_apply_warning_profile(ImGuiDX12App)
+
+if(IMGUI_DX12APP_BUILD_TEST_DLL)
+    set(KIERO_INCLUDE_D3D9 OFF CACHE BOOL "Disable D3D9 hooks for test DLL build" FORCE)
+    set(KIERO_INCLUDE_D3D10 OFF CACHE BOOL "Disable D3D10 hooks for test DLL build" FORCE)
+    set(KIERO_INCLUDE_D3D11 OFF CACHE BOOL "Disable D3D11 hooks for test DLL build" FORCE)
+    set(KIERO_INCLUDE_D3D12 ON CACHE BOOL "Enable D3D12 hooks for test DLL build" FORCE)
+    set(KIERO_INCLUDE_OPENGL OFF CACHE BOOL "Disable OpenGL hooks for test DLL build" FORCE)
+    set(KIERO_INCLUDE_VULKAN OFF CACHE BOOL "Disable Vulkan hooks for test DLL build" FORCE)
+    set(KIERO_BUILD_MINHOOK ON CACHE BOOL "Build MinHook-backed kiero bindings" FORCE)
+    set(KIERO_MINHOOK_EXTERNAL OFF CACHE BOOL "Use bundled MinHook for kiero" FORCE)
+    set(KIERO_BUILD_SAFETYHOOK OFF CACHE BOOL "Disable SafetyHook-backed kiero bindings" FORCE)
+    set(KIERO_BUILD_EXAMPLES OFF CACHE BOOL "Disable kiero example targets" FORCE)
+
+    if(CMAKE_VERSION VERSION_GREATER_EQUAL "4.0")
+        set(CMAKE_POLICY_VERSION_MINIMUM "3.5" CACHE STRING "Policy floor for legacy dependency CMakeLists" FORCE)
     endif()
+
+    FetchContent_Declare(
+        kiero
+        GIT_REPOSITORY https://github.com/BasedInc/kiero.git
+        GIT_TAG 269860311ac04b0ee89e68f68bca55abd02a3390
+    )
+    FetchContent_MakeAvailable(kiero)
+    if(MSVC AND TARGET kiero-core)
+        target_compile_options(kiero-core PRIVATE /FIdxgi1_5.h)
+    endif()
+
+    add_subdirectory(Test)
+    add_dependencies(ImGuiDX12App ImGuiDX12TestHook)
+    b_embed_proxy_target(ImGuiDX12TestHook ImGuiDX12TestHookEmbedProxy)
+    b_embed(ImGuiDX12TestHookEmbedProxy assets/shaders/ui_shader_shared.hlsli)
+    b_embed(ImGuiDX12TestHookEmbedProxy assets/shaders/ui_default_vs.hlsl)
+    b_embed(ImGuiDX12TestHookEmbedProxy assets/shaders/glow_default.hlsl)
+    b_embed(ImGuiDX12TestHookEmbedProxy assets/shaders/shadow_default.hlsl)
 endif()

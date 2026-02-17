@@ -7,6 +7,7 @@ This README is a full handbook for this codebase: startup flow, system ordering,
 ## Table Of Contents
 - [Architecture](#architecture)
 - [Build And Run](#build-and-run)
+- [Injected DX12 Test DLL (Bedrock DX12)](#injected-dx12-test-dll-bedrock-dx12)
 - [Lifecycle API (`DX12Init::RunApp`)](#lifecycle-api-dx12initrunapp)
 - [Frame Update/Render Order](#frame-updaterender-order)
 - [Startup Runtime](#startup-runtime)
@@ -25,7 +26,9 @@ This README is a full handbook for this codebase: startup flow, system ordering,
 
 High-level modules:
 - `src/Dx12Init/*`
-  Win32 + DX12 device/swapchain/frame-lifecycle runtime (`DX12Init::RunApp`).
+  Win32 + DX12 device/swapchain/frame-lifecycle runtime (`DX12Init::RunApp`) and external host runtime (`ExternalOverlayRuntime`).
+- `src/Scene/ShowcaseRuntime.*`
+  Shared demo-scene lifecycle used by both standalone app and injected DLL paths.
 - `src/Render/ImguiRender.*`
   ImGui frame begin/end bridge.
 - `src/Render/RenderUtils/*`
@@ -36,6 +39,10 @@ High-level modules:
 Core responsibilities:
 - `DX12Init`
   Owns window/device loop, frame packet callbacks, and shutdown.
+- `ExternalOverlayRuntime`
+  Owns injected-host queue capture/resource lifecycle, resize handling, WndProc input capture, and external frame bridging.
+- `ShowcaseRuntime`
+  Owns scene setup/update/shutdown and UI entity registry state for the demo.
 - `UIRenderer`
   ECS update + draw orchestration.
 - `ShaderSystem`
@@ -44,6 +51,16 @@ Core responsibilities:
   Async font fetch, runtime face registry, deferred atlas rebuild, font resolve helpers.
 - `Components::ImageLoaderSystem`
   Async source fetch, decode, DX12 upload, fallback source switching, progress/debug stats.
+
+Ownership map:
+- `src/main.cpp` + `src/MainRendering.*`
+  standalone EXE entry only.
+- `src/Scene/ShowcaseRuntime.*`
+  shared scene logic (used by EXE and injected DLL).
+- `src/Dx12Init/ExternalOverlayRuntime.*`
+  injected host runtime core.
+- `Test/InjectedDx12/DirectX12HookRuntime.*`
+  thin kiero shim (bind/unbind + forward only).
 
 ## Build And Run
 
@@ -72,6 +89,50 @@ Dependency notes:
   - `shader.default.vs`
   - `glow.default`
   - `shadow.default`
+
+Optional dual-target build (app + injected DX12 test DLL):
+
+```powershell
+cmd /c "\"C:\Program Files\Microsoft Visual Studio\18\Community\VC\Auxiliary\Build\vcvars64.bat\" && cmake -S . -B out/build/x64-Debug -G Ninja -DCMAKE_BUILD_TYPE=Debug -DIMGUI_DX12APP_BUILD_TEST_DLL=ON && cmake --build out/build/x64-Debug --config Debug --target ImGuiDX12App ImGuiDX12TestHook"
+```
+
+## Injected DX12 Test DLL (Bedrock DX12)
+
+Build option:
+- `IMGUI_DX12APP_BUILD_TEST_DLL=ON`
+
+Produced target:
+- `ImGuiDX12TestHook` (DLL), output to `out/build/<config>/Test/`.
+
+What it does:
+- Hooks DX12 host-owned swapchains through `BasedInc/kiero` (D3D12 path).
+- Uses the shared `Scene::ShowcaseRuntime` full demo scene by default.
+- Initializes the renderer through `DX12Init` external-runtime API.
+- Handles swapchain resize by tearing down and reinitializing hook-side resources.
+- Uses strict queue ownership checks and per-backbuffer fence synchronization before allocator reuse.
+- Uses always-capture input policy in injected mode so dragging/clicking remains reliable.
+- Disables image-loader components and shader-loading components in injected mode for host stability.
+
+Runtime scope:
+- DX12 hosts only for this test path.
+- Intended for authorized local testing environments.
+- Manual injection workflow is intentionally high-level only; no anti-cheat bypass guidance is provided.
+- Debug and Release test DLL builds are supported; Release is recommended for runtime validation.
+
+Safety defaults in injected mode:
+- `AllowFontAtlasRebuild=false`
+- `AllowShaderSystem=false`
+- `CaptureHostInputAlways=true`
+- Raw fallback input polling enabled (`GetCursorPos` + `GetAsyncKeyState`) before `NewFrame`.
+- `Scene::ShowcaseRuntime::Options` defaults for injected path:
+  - `EnableImageLoading=false`
+  - `EnableShaderLoading=false`
+- Known conflicting overlay modules fail closed (hook auto-disables):
+  - `graphics-hook64.dll`
+  - `RTSSHooks64.dll`
+  - `GameOverlayRenderer64.dll`
+  - `DiscordHook64.dll`
+  - `NvCameraAllowlisting64.dll`
 
 ## Lifecycle API (`DX12Init::RunApp`)
 
@@ -106,6 +167,45 @@ Entry point:
 
 Exit:
 - `DX12Init::RequestExit()`
+
+External host-owned runtime API (for injected/hooked DX12 renderers):
+- `DX12Init::ExternalRuntimeConfig`
+  - `WindowHandle`
+  - `Device`
+  - `CommandQueue`
+  - `SrvHeap`
+  - `BackbufferFormat`
+  - `NumFramesInFlight`
+  - `AutoInitImGui`
+  - `AutoInitShaderSystem`
+  - `AllowFontAtlasRebuild`
+  - `AllowShaderSystem`
+  - `WaitForGpuIdle`
+- `DX12Init::ExternalFrameInput`
+  - `CommandList`
+  - `CurrentRTV`
+  - `DisplaySize`
+  - `BackBufferIndex`
+  - `DeltaTime`
+- `bool DX12Init::AttachExternalRuntime(const ExternalRuntimeConfig&);`
+- `void DX12Init::DetachExternalRuntime();`
+- `bool DX12Init::BeginExternalFrame(const ExternalFrameInput&, FramePacket& outPacket);`
+- `void DX12Init::EndExternalFrame();`
+
+Shared scene/runtime interfaces:
+- `Scene::ShowcaseRuntime`
+  - `Setup(HWND)`
+  - `RenderFrame(const DX12Init::FramePacket&)`
+  - `Shutdown()`
+- `DX12Init::ExternalOverlayRuntime`
+  - `Configure(const Config&)`
+  - `CaptureQueueCandidate(ID3D12CommandQueue*)`
+  - `OnPresent(...)`
+  - `OnResizeBuffers(...)`
+  - `OnResizeBuffers1(...)`
+  - `OnWndProc(...)`
+  - `Shutdown()`
+  - `IsReady()`
 
 ## Frame Update/Render Order
 
@@ -907,7 +1007,7 @@ If toolchain cache is stale:
 
 ## Strict Warning Policy
 
-Defined in `CMakeLists.txt` for target `ImGuiDX12App`.
+Defined in `CMakeLists.txt` and applied to first-party targets (`ImGuiDX12App`, and `ImGuiDX12TestHook` when enabled).
 
 Options:
 - `IMGUI_DX12APP_WARNINGS_AS_ERRORS` (default `ON`)
@@ -950,7 +1050,7 @@ Warnings-as-errors:
 ## Main Demo Reference
 
 End-to-end usage examples live in:
-- `src/MainRendering.cpp`
+- `src/Scene/ShowcaseRuntime.cpp`
 
 This file demonstrates:
 - tabbed UI layout

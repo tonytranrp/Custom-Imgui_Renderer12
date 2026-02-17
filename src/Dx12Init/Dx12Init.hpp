@@ -61,6 +61,28 @@ namespace DX12Init {
     constexpr int NUM_BACK_BUFFERS = 3;
     constexpr int NUM_FRAMES_IN_FLIGHT = 3;
 
+    struct ExternalRuntimeConfig {
+        HWND WindowHandle = nullptr;
+        ID3D12Device* Device = nullptr;
+        ID3D12CommandQueue* CommandQueue = nullptr;
+        ID3D12DescriptorHeap* SrvHeap = nullptr;
+        DXGI_FORMAT BackbufferFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
+        int NumFramesInFlight = NUM_FRAMES_IN_FLIGHT;
+        bool AutoInitImGui = true;
+        bool AutoInitShaderSystem = true;
+        bool AllowFontAtlasRebuild = true;
+        bool AllowShaderSystem = true;
+        std::function<void()> WaitForGpuIdle;
+    };
+
+    struct ExternalFrameInput {
+        ID3D12GraphicsCommandList* CommandList = nullptr;
+        D3D12_CPU_DESCRIPTOR_HANDLE CurrentRTV = {};
+        ImVec2 DisplaySize = ImVec2(0.0f, 0.0f);
+        UINT BackBufferIndex = 0;
+        float DeltaTime = 1.0f / 60.0f;
+    };
+
     // Global DX12 State (declared as extern)
     extern ID3D12Device*                g_pd3dDevice;
     extern ID3D12DescriptorHeap*        g_pd3dRtvDescHeap;
@@ -87,6 +109,11 @@ namespace DX12Init {
     void ResizeSwapChain(HWND hWnd, int width, int height);
     int RunApp(HINSTANCE instance, const RunConfig& runConfig, const RuntimeCallbacks& callbacks);
     void RequestExit();
+
+    bool AttachExternalRuntime(const ExternalRuntimeConfig& config);
+    void DetachExternalRuntime();
+    bool BeginExternalFrame(const ExternalFrameInput& input, FramePacket& outPacket);
+    void EndExternalFrame();
     
     // Descriptor Management
     D3D12_CPU_DESCRIPTOR_HANDLE GetCpuSrvHandle(int index);

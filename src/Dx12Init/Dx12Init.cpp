@@ -29,7 +29,15 @@ namespace DX12Init {
             bool DeviceInitialized = false;
             bool WindowCreated = false;
             bool ClassRegistered = false;
+            bool ExternalMode = false;
+            bool ExternalFrameActive = false;
+            bool ExternalShaderPassActive = false;
             HWND WindowHandle = nullptr;
+            ExternalRuntimeConfig ExternalConfig = {};
+            D3D12_CPU_DESCRIPTOR_HANDLE ExternalCurrentRTV = {};
+            ImVec2 ExternalDisplaySize = ImVec2(0.0f, 0.0f);
+            UINT ExternalBackBufferIndex = 0;
+            float ExternalDeltaTime = 1.0f / 60.0f;
         };
 
         RuntimeState s_RuntimeState{};
@@ -77,7 +85,61 @@ namespace DX12Init {
             return DefWindowProcW(hWnd, msg, wParam, lParam);
         }
 
+        void ResetExternalBindings() {
+            g_pd3dCommandList = nullptr;
+            g_pd3dCommandQueue = nullptr;
+            g_pd3dSrvDescHeap = nullptr;
+            g_pd3dRtvDescHeap = nullptr;
+            g_pd3dDevice = nullptr;
+            g_pSwapChain = nullptr;
+            g_hSwapChainWaitableObject = nullptr;
+            g_fence = nullptr;
+            g_fenceEvent = nullptr;
+            g_fenceLastSignaledValue = 0;
+            for (UINT i = 0; i < NUM_BACK_BUFFERS; ++i) {
+                g_mainRenderTargetResource[i] = nullptr;
+                g_mainRenderTargetDescriptor[i] = {};
+            }
+        }
+
+        float SanitizeDeltaTime(float dt, ImGuiIO* ioFallback = nullptr) {
+            if (std::isfinite(dt) && dt > 0.0f) {
+                if (dt > 0.25f) {
+                    dt = 0.25f;
+                }
+                return dt;
+            }
+
+            if (ioFallback && std::isfinite(ioFallback->Framerate) && ioFallback->Framerate > 1.0f) {
+                dt = 1.0f / ioFallback->Framerate;
+                if (dt > 0.25f) {
+                    dt = 0.25f;
+                }
+                return dt;
+            }
+            return 1.0f / 60.0f;
+        }
+
         void UnwindRuntime() {
+            if (s_RuntimeState.ExternalMode) {
+                if (s_RuntimeState.ShaderInitialized) {
+                    RenderUtils::ShaderSystem::Shutdown();
+                    s_RuntimeState.ShaderInitialized = false;
+                }
+                if (s_RuntimeState.ImGuiInitialized) {
+                    ImguiRender::Cleanup();
+                    s_RuntimeState.ImGuiInitialized = false;
+                }
+                s_RuntimeState.ExternalFrameActive = false;
+                s_RuntimeState.ExternalShaderPassActive = false;
+                s_RuntimeState.ExternalConfig = {};
+                ResetExternalBindings();
+                s_RuntimeState.ExternalMode = false;
+                s_RuntimeState.Config = nullptr;
+                s_RuntimeState.WindowHandle = nullptr;
+                return;
+            }
+
             if (s_RuntimeState.DeviceInitialized) {
                 WaitForLastSubmittedFrame();
             }
@@ -271,6 +333,17 @@ namespace DX12Init {
     }
 
     void WaitForLastSubmittedFrame() {
+        if (s_RuntimeState.ExternalMode) {
+            if (s_RuntimeState.ExternalConfig.WaitForGpuIdle) {
+                s_RuntimeState.ExternalConfig.WaitForGpuIdle();
+            }
+            return;
+        }
+
+        if (!g_fence || !g_fenceEvent) {
+            return;
+        }
+
         FrameContext* frameCtx = &g_frameContext[g_frameIndex % NUM_FRAMES_IN_FLIGHT];
         UINT64 fenceValue = frameCtx->FenceValue;
         if (fenceValue == 0)
@@ -348,7 +421,147 @@ namespace DX12Init {
         s_RuntimeState.RequestExit = true;
     }
 
+    bool AttachExternalRuntime(const ExternalRuntimeConfig& config) {
+        if (s_RuntimeState.ExternalMode || s_RuntimeState.DeviceInitialized || s_RuntimeState.WindowCreated) {
+            return false;
+        }
+        if (!config.WindowHandle || !config.Device || !config.CommandQueue || !config.SrvHeap) {
+            return false;
+        }
+
+        s_RuntimeState = {};
+        s_RuntimeState.ExternalMode = true;
+        s_RuntimeState.WindowHandle = config.WindowHandle;
+        s_RuntimeState.ExternalConfig = config;
+        if (s_RuntimeState.ExternalConfig.NumFramesInFlight <= 0) {
+            s_RuntimeState.ExternalConfig.NumFramesInFlight = 1;
+        }
+
+        g_pd3dDevice = config.Device;
+        g_pd3dCommandQueue = config.CommandQueue;
+        g_pd3dSrvDescHeap = config.SrvHeap;
+        g_pd3dCommandList = nullptr;
+        g_pd3dRtvDescHeap = nullptr;
+        g_pSwapChain = nullptr;
+
+        if (config.AutoInitImGui) {
+            ImguiRender::Init(
+                config.WindowHandle,
+                config.Device,
+                s_RuntimeState.ExternalConfig.NumFramesInFlight,
+                config.BackbufferFormat,
+                config.SrvHeap,
+                config.CommandQueue);
+            s_RuntimeState.ImGuiInitialized = true;
+        }
+
+        if (config.AutoInitShaderSystem && config.AllowShaderSystem) {
+            RenderUtils::ShaderSystem::Initialize(config.Device);
+            s_RuntimeState.ShaderInitialized = true;
+        }
+
+        return true;
+    }
+
+    void DetachExternalRuntime() {
+        if (!s_RuntimeState.ExternalMode) {
+            return;
+        }
+        UnwindRuntime();
+        s_RuntimeState = {};
+    }
+
+    bool BeginExternalFrame(const ExternalFrameInput& input, FramePacket& outPacket) {
+        outPacket = {};
+        try {
+            if (!s_RuntimeState.ExternalMode || !input.CommandList) {
+                return false;
+            }
+            if (s_RuntimeState.ExternalFrameActive) {
+                return false;
+            }
+
+            s_RuntimeState.ExternalFrameActive = true;
+            s_RuntimeState.ExternalCurrentRTV = input.CurrentRTV;
+            s_RuntimeState.ExternalBackBufferIndex = input.BackBufferIndex;
+            g_pd3dCommandList = input.CommandList;
+
+            ImGuiIO* io = nullptr;
+            ImVec2 displaySize = input.DisplaySize;
+            if (s_RuntimeState.ImGuiInitialized) {
+                if (s_RuntimeState.ExternalConfig.AllowFontAtlasRebuild) {
+                    RenderUtils::FontSystem::ProcessPendingAtlasRebuild();
+                }
+                ImguiRender::NewFrame();
+                io = &ImGui::GetIO();
+                if (displaySize.x <= 0.0f || displaySize.y <= 0.0f) {
+                    displaySize = io->DisplaySize;
+                }
+            }
+
+            const float deltaTime = SanitizeDeltaTime(input.DeltaTime, io);
+            s_RuntimeState.ExternalDisplaySize = displaySize;
+            s_RuntimeState.ExternalDeltaTime = deltaTime;
+
+            if (s_RuntimeState.ShaderInitialized &&
+                s_RuntimeState.ImGuiInitialized &&
+                s_RuntimeState.ExternalConfig.AllowShaderSystem) {
+                RenderUtils::ShaderSystem::BeginImGuiPass(
+                    input.CommandList,
+                    input.CurrentRTV,
+                    displaySize);
+                s_RuntimeState.ExternalShaderPassActive = true;
+            }
+
+            outPacket.WindowHandle = s_RuntimeState.WindowHandle;
+            outPacket.Frame = nullptr;
+            outPacket.BackBufferIndex = input.BackBufferIndex;
+            outPacket.CommandList = input.CommandList;
+            outPacket.IO = io;
+            outPacket.DeltaTime = deltaTime;
+            return true;
+        } catch (const std::exception& ex) {
+            LogRuntimeError("BeginExternalFrame", ex.what());
+        } catch (...) {
+            LogRuntimeError("BeginExternalFrame", "Unhandled non-standard exception.");
+        }
+
+        if (s_RuntimeState.ExternalShaderPassActive) {
+            RenderUtils::ShaderSystem::EndImGuiPass();
+            s_RuntimeState.ExternalShaderPassActive = false;
+        }
+        s_RuntimeState.ExternalFrameActive = false;
+        return false;
+    }
+
+    void EndExternalFrame() {
+        if (!s_RuntimeState.ExternalMode || !s_RuntimeState.ExternalFrameActive) {
+            return;
+        }
+
+        try {
+            if (s_RuntimeState.ImGuiInitialized && g_pd3dCommandList) {
+                ImGui::Render();
+                ImguiRender::RenderDrawData(g_pd3dCommandList);
+            }
+        } catch (const std::exception& ex) {
+            LogRuntimeError("EndExternalFrame", ex.what());
+        } catch (...) {
+            LogRuntimeError("EndExternalFrame", "Unhandled non-standard exception.");
+        }
+
+        if (s_RuntimeState.ExternalShaderPassActive) {
+            RenderUtils::ShaderSystem::EndImGuiPass();
+            s_RuntimeState.ExternalShaderPassActive = false;
+        }
+        s_RuntimeState.ExternalFrameActive = false;
+    }
+
     int RunApp(HINSTANCE instance, const RunConfig& runConfig, const RuntimeCallbacks& callbacks) {
+        if (s_RuntimeState.ExternalMode) {
+            DetachExternalRuntime();
+        }
+
         s_RuntimeState = {};
         s_RuntimeState.Config = &runConfig;
         s_RuntimeState.RequestExit = false;

@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use std::ffi::CStr;
 use std::io::{Cursor, Read};
 use std::os::raw::c_char;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -82,6 +83,13 @@ lazy_static! {
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 
+fn lock_or_recover<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    match mutex.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    }
+}
+
 fn normalize_delay_ms(numer: u32, denom: u32) -> u32 {
     if numer == 0 {
         return 100;
@@ -129,8 +137,8 @@ pub extern "C" fn cancel_fetch_request(id: u64) {
     if id == 0 {
         return;
     }
-    PENDING_REQUESTS.lock().unwrap().remove(&id);
-    PENDING_BYTE_REQUESTS.lock().unwrap().remove(&id);
+    lock_or_recover(&PENDING_REQUESTS).remove(&id);
+    lock_or_recover(&PENDING_BYTE_REQUESTS).remove(&id);
 }
 
 fn decode_media(bytes: &[u8]) -> Result<FetchMediaResult, String> {
@@ -251,16 +259,18 @@ pub unsafe extern "C" fn start_fetch_media(source: *const c_char, source_kind: i
 
     let id = NEXT_ID.fetch_add(1, Ordering::SeqCst);
     let state = Arc::new(Mutex::new(FetchState::Loading));
-    PENDING_REQUESTS.lock().unwrap().insert(id, state.clone());
+    lock_or_recover(&PENDING_REQUESTS).insert(id, state.clone());
 
     thread::spawn(move || {
-        let result =
-            load_source_bytes(&source_str, source_kind).and_then(|bytes| decode_media(&bytes));
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            load_source_bytes(&source_str, source_kind).and_then(|bytes| decode_media(&bytes))
+        }));
 
-        let mut state_guard = state.lock().unwrap();
+        let mut state_guard = lock_or_recover(&state);
         *state_guard = match result {
-            Ok(payload) => FetchState::Ready(payload),
+            Ok(Ok(payload)) => FetchState::Ready(payload),
             Err(_) => FetchState::Failed,
+            Ok(Err(_)) => FetchState::Failed,
         };
     });
 
@@ -283,17 +293,15 @@ pub unsafe extern "C" fn start_fetch_bytes(source: *const c_char, source_kind: i
 
     let id = NEXT_ID.fetch_add(1, Ordering::SeqCst);
     let state = Arc::new(Mutex::new(FetchBytesState::Loading));
-    PENDING_BYTE_REQUESTS
-        .lock()
-        .unwrap()
-        .insert(id, state.clone());
+    lock_or_recover(&PENDING_BYTE_REQUESTS).insert(id, state.clone());
 
     thread::spawn(move || {
-        let result = load_source_bytes(&source_str, source_kind);
-        let mut state_guard = state.lock().unwrap();
+        let result = catch_unwind(AssertUnwindSafe(|| load_source_bytes(&source_str, source_kind)));
+        let mut state_guard = lock_or_recover(&state);
         *state_guard = match result {
-            Ok(bytes) => FetchBytesState::Ready(bytes),
+            Ok(Ok(bytes)) => FetchBytesState::Ready(bytes),
             Err(_) => FetchBytesState::Failed,
+            Ok(Err(_)) => FetchBytesState::Failed,
         };
     });
 
@@ -344,7 +352,7 @@ pub unsafe extern "C" fn check_fetch_media_status_ex(
     }
 
     let state_arc = {
-        let requests = PENDING_REQUESTS.lock().unwrap();
+        let requests = lock_or_recover(&PENDING_REQUESTS);
         if let Some(arc) = requests.get(&id) {
             arc.clone()
         } else {
@@ -352,7 +360,7 @@ pub unsafe extern "C" fn check_fetch_media_status_ex(
         }
     };
 
-    let mut state_guard = state_arc.lock().unwrap();
+    let mut state_guard = lock_or_recover(&state_arc);
     match std::mem::replace(&mut *state_guard, FetchState::Loading) {
         FetchState::Loading => {
             *state_guard = FetchState::Loading;
@@ -360,12 +368,12 @@ pub unsafe extern "C" fn check_fetch_media_status_ex(
         }
         FetchState::Failed => {
             drop(state_guard);
-            PENDING_REQUESTS.lock().unwrap().remove(&id);
+            lock_or_recover(&PENDING_REQUESTS).remove(&id);
             FetchStatusCode::Failed as i32
         }
         FetchState::Ready(payload) => {
             drop(state_guard);
-            PENDING_REQUESTS.lock().unwrap().remove(&id);
+            lock_or_recover(&PENDING_REQUESTS).remove(&id);
 
             match payload {
                 FetchMediaResult::Static {
@@ -456,7 +464,7 @@ pub unsafe extern "C" fn check_fetch_bytes_status_ex(
     }
 
     let state_arc = {
-        let requests = PENDING_BYTE_REQUESTS.lock().unwrap();
+        let requests = lock_or_recover(&PENDING_BYTE_REQUESTS);
         if let Some(arc) = requests.get(&id) {
             arc.clone()
         } else {
@@ -464,7 +472,7 @@ pub unsafe extern "C" fn check_fetch_bytes_status_ex(
         }
     };
 
-    let mut state_guard = state_arc.lock().unwrap();
+    let mut state_guard = lock_or_recover(&state_arc);
     match std::mem::replace(&mut *state_guard, FetchBytesState::Loading) {
         FetchBytesState::Loading => {
             *state_guard = FetchBytesState::Loading;
@@ -472,12 +480,12 @@ pub unsafe extern "C" fn check_fetch_bytes_status_ex(
         }
         FetchBytesState::Failed => {
             drop(state_guard);
-            PENDING_BYTE_REQUESTS.lock().unwrap().remove(&id);
+            lock_or_recover(&PENDING_BYTE_REQUESTS).remove(&id);
             FetchStatusCode::Failed as i32
         }
         FetchBytesState::Ready(bytes) => {
             drop(state_guard);
-            PENDING_BYTE_REQUESTS.lock().unwrap().remove(&id);
+            lock_or_recover(&PENDING_BYTE_REQUESTS).remove(&id);
 
             let mut boxed_slice = bytes.into_boxed_slice();
             let len = boxed_slice.len();
