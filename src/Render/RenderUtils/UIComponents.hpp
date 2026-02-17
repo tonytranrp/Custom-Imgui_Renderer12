@@ -4,6 +4,7 @@
 #include "Components/StyleComponent.hpp"
 #include "Components/ContainerComponent.hpp"
 #include "Components/TextComponent.hpp"
+#include "Components/FontsComponent.hpp"
 #include "Components/ClipComponent.hpp"
 #include "Components/ParentComponent.hpp"
 #include "Components/DraggableComponent.hpp"

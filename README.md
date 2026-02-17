@@ -1,340 +1,964 @@
 # Custom ImGui Renderer12
 
-DirectX 12 + ImGui + EnTT ECS renderer framework with a Rust media bridge.  
-This project is set up as a reusable rendering library style runtime: lifecycle management is centralized in `DX12Init::RunApp`, UI composition is ECS-driven via `RenderUtils`, shader effects support CPU/shader fallback paths, and media loading (including GIF) is handled through Rust FFI.
+DirectX 12 + ImGui + EnTT ECS renderer with Rust-powered async loading for images/media/fonts.
 
-## Architecture Overview
+This README is a full handbook for this codebase: startup flow, system ordering, component arguments, custom callback contracts, shader/font/media behavior, and crash/error handling.
 
-- `DX12Init`:
-  owns Win32 + DX12 runtime lifecycle (`RunApp`, frame loop, present, teardown).
-- `RenderUtils`:
-  ECS UI framework (`UIRenderer`, `UIBuilder`, components, systems).
-- `ShaderSystem`:
-  compile/cache/queue/render shader effects, uniform resolvers, fallback handling.
-- `RustComponents`:
-  async media fetch/decode (URL/local path, static + animated RGBA) bridged to C++.
+## Table Of Contents
+- [Architecture](#architecture)
+- [Build And Run](#build-and-run)
+- [Lifecycle API (`DX12Init::RunApp`)](#lifecycle-api-dx12initrunapp)
+- [Frame Update/Render Order](#frame-updaterender-order)
+- [Startup Runtime](#startup-runtime)
+- [UI Builder API](#ui-builder-api)
+- [Custom Component API (All Arguments)](#custom-component-api-all-arguments)
+- [Text + Fonts](#text--fonts)
+- [Shader System](#shader-system)
+- [Image/Media Loader System](#imagemedia-loader-system)
+- [Component Reference (All Public Components)](#component-reference-all-public-components)
+- [Rust FFI Reference](#rust-ffi-reference)
+- [Diagnostics And Troubleshooting](#diagnostics-and-troubleshooting)
+- [Strict Warning Policy](#strict-warning-policy)
+- [Practical Safety Rules](#practical-safety-rules)
 
-## Feature Highlights
+## Architecture
 
-- ECS component-driven UI (EnTT).
-- Fluent UI scene construction (`UIBuilder`).
-- Startup loading gate with modes/priorities/timeouts (`StartupRuntime`).
-- Animation, tab switching, input handling, collisions, clipping, drag/lock systems.
-- Shape, glow, shadow, style, transparency, header, and custom rendering components.
-- Shader-backed effects with CPU fallback and runtime compile policies.
-- Async media: static images, multi-source switching, GIF playback.
-- Compile-time embedded default shader assets via `battery::embed`.
+High-level modules:
+- `src/Dx12Init/*`
+  Win32 + DX12 device/swapchain/frame-lifecycle runtime (`DX12Init::RunApp`).
+- `src/Render/ImguiRender.*`
+  ImGui frame begin/end bridge.
+- `src/Render/RenderUtils/*`
+  ECS UI framework (`UIRenderer`, `UIBuilder`, components, shader/font systems).
+- `src/RustComponents/*`
+  Rust async fetch/decode bridge for media bytes/images/animations.
 
-## Requirements
+Core responsibilities:
+- `DX12Init`
+  Owns window/device loop, frame packet callbacks, and shutdown.
+- `UIRenderer`
+  ECS update + draw orchestration.
+- `ShaderSystem`
+  Shader source resolution, compile/cache, draw queue/callback path, fallback behavior.
+- `FontSystem`
+  Async font fetch, runtime face registry, deferred atlas rebuild, font resolve helpers.
+- `Components::ImageLoaderSystem`
+  Async source fetch, decode, DX12 upload, fallback source switching, progress/debug stats.
 
-- Windows (DX12 runtime target).
+## Build And Run
+
+Prerequisites:
+- Windows + DX12 runtime.
 - Visual Studio/MSVC toolchain.
 - CMake `>= 3.21`.
-- Ninja (or Visual Studio CMake profiles).
-- Rust + rustup toolchain:
-  - `stable-x86_64-pc-windows-msvc`
-- Git.
+- Rust toolchain `stable-x86_64-pc-windows-msvc`.
 
-Dependencies are resolved from `CMakeLists.txt`:
-- ImGui (`ocornut/imgui`)
-- EnTT (`skypjack/entt`)
-- Corrosion (`corrosion-rs/corrosion`)
-- battery::embed (`batterycenter/embed`)
-
-## Fetch & Setup (Clone + Build + Embed)
-
-```powershell
-git clone <your-repo-url> Custom-Imgui_Renderer12
-cd Custom-Imgui_Renderer12
-rustup toolchain install stable-x86_64-pc-windows-msvc
-```
-
-Use an MSVC developer environment for builds (recommended):
+Recommended build command (MSVC env):
 
 ```powershell
 cmd /c "\"C:\Program Files\Microsoft Visual Studio\18\Community\VC\Auxiliary\Build\vcvars64.bat\" && cmake -S . -B out/build/x64-Debug -G Ninja -DCMAKE_BUILD_TYPE=Debug && cmake --build out/build/x64-Debug --config Debug --target ImGuiDX12App"
 ```
 
-Notes:
-- Default shaders are compile-time embedded with `battery::embed`.
-- No runtime shader file copy step is required for shipped defaults.
-
-## Run
-
-If built with Ninja in Debug:
+Run:
 
 ```powershell
 .\out\build\x64-Debug\ImGuiDX12App.exe
 ```
 
-From Visual Studio CMake, run the generated debug target directly in IDE.
+Dependency notes:
+- ImGui, EnTT, Corrosion, battery::embed are fetched by CMake.
+- Rust compiler/cargo are resolved via `rustup which` and forced into Corrosion configuration.
+- Default shaders are compile-time embedded (`battery::embed`):
+  - `shader.default.vs`
+  - `glow.default`
+  - `shadow.default`
 
-## Quickstart: Lifecycle API (`DX12Init::RunApp`)
+## Lifecycle API (`DX12Init::RunApp`)
 
-```cpp
-#include "Dx12Init/Dx12Init.hpp"
-#include "Render/RenderUtils/UIRenderer.hpp"
+Header: `src/Dx12Init/Dx12Init.hpp`
 
-entt::registry registry;
+Primary structs:
+- `DX12Init::WindowConfig`
+  window class/title/position/style/show options.
+- `DX12Init::RunConfig`
+  runtime behavior:
+  - `ClearColor[4]`
+  - `VSync`
+  - `AutoInitImGui`
+  - `AutoInitShaderSystem`
+  - `AutoShowWindow`
+  - `MessageHook` (`std::function<LRESULT(HWND, UINT, WPARAM, LPARAM, bool&)>`)
+- `DX12Init::FramePacket`
+  per-frame data passed to `OnFrame`:
+  - `WindowHandle`
+  - `FrameContext*`
+  - `BackBufferIndex`
+  - `ID3D12GraphicsCommandList*`
+  - `ImGuiIO*`
+  - `DeltaTime`
+- `DX12Init::RuntimeCallbacks`
+  - `OnSetup(HWND)`
+  - `OnFrame(const FramePacket&)`
+  - `OnShutdown()`
 
-int RunMyApp(HINSTANCE hInstance) {
-    DX12Init::RunConfig config;
-    config.Window.Title = L"My Renderer App";
-    config.Window.Width = 1600;
-    config.Window.Height = 900;
-    config.AutoInitImGui = true;
-    config.AutoInitShaderSystem = true;
+Entry point:
+- `int DX12Init::RunApp(HINSTANCE instance, const RunConfig& runConfig, const RuntimeCallbacks& callbacks);`
 
-    DX12Init::RuntimeCallbacks callbacks;
-    callbacks.OnSetup = [&](HWND) {
-        RenderUtils::UIRenderer::Init(registry);
-        // Build ECS UI tree here.
-    };
+Exit:
+- `DX12Init::RequestExit()`
 
-    callbacks.OnFrame = [&](const DX12Init::FramePacket& frame) {
-        const float dt = frame.DeltaTime;
-        RenderUtils::UIRenderer::Update(registry, dt);
-        RenderUtils::UIRenderer::Render(registry);
-    };
+## Frame Update/Render Order
 
-    callbacks.OnShutdown = [&]() {
-        RenderUtils::UIRenderer::Shutdown(registry);
-    };
+`UIRenderer::Update` order is intentionally fixed:
+- Tab visibility logic
+- Tab trigger logic
+- `UpdateAnimations`
+- custom `OnUpdate` callbacks
+- `ResolveTransforms`
+- `ResolveDepth`
+- `FontSystem::Update`
+- `UpdateInput`
+- `OptionsSystem::Update`
+- `ShaderSystem::UpdateCompile`
+- custom `OnInput` callbacks
+- `UpdateText`
+- `UpdateImageLoader`
 
-    return DX12Init::RunApp(hInstance, config, callbacks);
-}
-```
+`UIRenderer::Render` behavior:
+- Builds a local `std::vector<entt::entity>` and sorts deterministically by:
+  - `StyleComponent.ZIndexInt` ascending
+  - tie-break: `entt::to_integral(entity)` ascending
+- This removes sibling ordering instability and transparency flicker.
 
-Compatibility wrapper remains available:
-- `MainRendering::Run(HINSTANCE)` (see `src/MainRendering.cpp`).
+Render pass highlights:
+- Optional parent/self clip stack (`ClipComponent`).
+- Shadow before glow before background/content.
+- Shader glow/shadow try shader path first, fallback to CPU path if queue/compile fails.
+- Text paths resolve fonts through `FontSystem` based on apply flags.
+- Custom render callback runs per entity after main text/content draws.
 
-## Quickstart: ECS UI Construction (`UIBuilder`)
+## Startup Runtime
 
-```cpp
-RenderUtils::UIBuilder::Begin(registry)
-    .Create<RenderUtils::ContainerType::Window>("MainWindow")
-        .With<RenderUtils::TransformComponent>(
-            RenderUtils::TransformComponent()
-                .SetPosition(ImVec2(80, 80))
-                .SetSize(ImVec2(900, 560)))
-        .With<RenderUtils::StyleComponent>(
-            RenderUtils::StyleComponent()
-                .SetBackgroundColor(IM_COL32(34, 38, 47, 255))
-                .SetRounding(10.0f))
-        .Child(
-            RenderUtils::UIBuilder::Begin(registry)
-                .Create<RenderUtils::ContainerType::Panel>("Header")
-                .With<RenderUtils::TransformComponent>(
-                    RenderUtils::TransformComponent()
-                        .SetPosition(ImVec2(0, 0))
-                        .SetSize(ImVec2(900, 40)))
-                .With<RenderUtils::TextComponent>(
-                    RenderUtils::TextComponent("Hello ECS UI", IM_COL32(255, 255, 255, 255))))
-    .End();
-```
+Namespace: `RenderUtils::StartupRuntime` in `src/Render/RenderUtils/UIRenderer.hpp/.cpp`.
 
-Typical runtime flow in frame callback:
-- `UIRenderer::Update(...)`
-- `UIRenderer::Render(...)`
-- optional `UIRenderer::RenderInspector(...)` when debug mode is enabled.
+Config:
+- `Mode::BlockOnRequiredImages`
+- `Mode::ImmediateUI`
+- `Priority::ImagesFirst`
+- `Priority::SystemsFirst`
+- `Priority::Balanced`
+- `TimeoutSeconds`
 
-## Startup Orchestrator (`RenderUtils::StartupRuntime`)
-
-Use startup gate for required media loading before full interaction:
-
-```cpp
-RenderUtils::StartupRuntime::Config startupConfig;
-RenderUtils::StartupRuntime::State startupState;
-
-startupConfig.ModeValue = RenderUtils::StartupRuntime::Mode::BlockOnRequiredImages;
-startupConfig.PriorityValue = RenderUtils::StartupRuntime::Priority::ImagesFirst;
-startupConfig.TimeoutSeconds = 15.0f;
-
-RenderUtils::StartupRuntime::Update(registry, deltaTime, startupConfig, startupState);
-```
-
-Modes:
-- `BlockOnRequiredImages`
-- `ImmediateUI`
-
-Priorities:
-- `ImagesFirst`
-- `SystemsFirst`
-- `Balanced`
-
-State provides:
-- `Completed`, `TimedOut`, `ElapsedSec`
-- `Progress` (`ImageLoaderProgress`)
+State:
+- `Initialized`, `Completed`, `TimedOut`
+- `StartTimeSec`, `ElapsedSec`
+- `Progress` (`Components::ImageLoaderProgress`)
 - `SummaryLine`
 
-## Shader System Usage
+Behavior:
+- In blocking mode, required startup assets include:
+  - required images (`ImageLoader.StartupRequired`)
+  - required fonts (`FontFaceSpec.StartupRequired`)
+- Combined progress is computed from image + font systems.
 
-Primary header:
-- `src/Render/RenderUtils/ShaderSystem.hpp`
+## UI Builder API
+
+Header: `src/Render/RenderUtils/UIBuilder.hpp`
+
+### `UIBuilder`
+- `UIBuilder::Begin(registry)`
+- `.Create<ContainerType>(name)`
+  creates entity with default:
+  - `TransformComponent`
+  - `StyleComponent`
+  - `ContainerComponent`
+  - `InputStateComponent`
+  - `WindowHeaderComponent` auto-added for `ContainerType::Window`
+- `.With<Component>(args...)`
+- `.Child(const UIBuilder&)`
+- `.Child<ContainerType>(name, configureLambda)`
+- `.DrawAbove(targetName)`
+- `.IsTab(tabId)`
+- `.IsTabTrigger(tabId, activeColor, inactiveColor)`
+- `.Animate()` returns `AnimationBuilder`
+- `.AnimateLegacy(...)` (compat path)
+- `.End()`, `.Entity()`, `.Registry()`
+
+### `AnimationBuilder`
+- `.Duration(float)`
+- `.Ease(EasingType)`
+- `.Loop(bool)`
+- `.Float(start, end, apply)`
+- `.Vec2(start, end, apply)`
+- `.Color(start, end, apply)`
+- `.Custom([](float easedT, entt::registry&, entt::entity){ ... })`
+- `.Start()`
+
+## Custom Component API (All Arguments)
+
+Header: `src/Render/RenderUtils/CustomComponents/CustomComponent.hpp`
+
+`CustomComponent` callbacks:
+- `RenderCallback`
+  ```cpp
+  void(entt::registry& registry,
+       entt::entity entity,
+       ImDrawList* drawList,
+       ImVec2 p_min,
+       ImVec2 p_max,
+       bool isHovered,
+       bool isClicked)
+  ```
+- `UpdateCallback`
+  ```cpp
+  void(entt::registry& registry, entt::entity entity, float deltaTime)
+  ```
+- `InputCallback`
+  ```cpp
+  void(entt::registry& registry, entt::entity entity, const InputStateComponent& input)
+  ```
+
+Other fields:
+- `Enabled` (default `true`)
+- `Priority` (higher runs first for custom callback ordering)
+
+Setters:
+- `SetOnRender(...)`
+- `SetOnUpdate(...)`
+- `SetOnInput(...)`
+- `SetEnabled(bool)`
+- `SetPriority(int)`
+
+Runtime ordering:
+- `OnUpdate` runs before transforms/depth/input.
+- `OnInput` runs after input + options + shader compile update.
+- `OnRender` runs during draw pass for visible entities.
+
+Best practices:
+- Use `input.JustPressed`/`JustReleased` for edge-triggered actions.
+- Keep per-frame compute in `OnUpdate`, not `OnRender`.
+- For text inside custom draw, prefer `FontSystem::ResolveEntityFont` + `FontSystem::AddText`.
+
+## Text + Fonts
+
+### Text API
+
+Header: `src/Render/RenderUtils/Components/TextComponent.hpp`
+
+Enums:
+- `TextAlign`: `Left`, `Center`, `Right`, `Justify`
+- `TextFlags`: `Wrap`, `Clip`, `PrecisionMode` (+ bitwise helpers)
+- `TextStyle`: `Normal`, `Bold`, `Italic`
+
+`TextSpan`:
+- `Text`
+- `Color`
+- `Style`
+- `FontKey` (optional span-level face key)
+
+`TextComponent` fields:
+- `RawText`
+- `Spans`
+- `Color`
+- `Alignment`
+- `Flags`
+- `LineHeight`
+- `FontKey` (entity-level default text face key)
+- `CharacterTransformCallback`
+  ```cpp
+  void(int index, char c, ImVec2& pos, float& rotation, ImU32& color, float& scale)
+  ```
+
+Builder methods:
+- `Span(...)` overloads (with/without color/style/font key)
+- `SpanFont(text, fontKey, color, style)`
+- `SetFont(key)`
+- `Align(...)`
+- `SetFlags(...)`
+- `AddFlag(...)`
+- `SetLineHeight(...)`
+- `AddSpan(...)` legacy helper
+
+Layout helpers (`TextLayout`):
+- `CalculateLayout(...)`
+- `CalculateTextLines(...)`
+- Font-aware when resolver is provided.
+
+Notes:
+- `PrecisionMode` is used by hit-testing/collision constraints for text rect precision.
+- `Clip` pushes text clip rect inside entity content area.
+
+### Fonts Component API
+
+Header: `src/Render/RenderUtils/Components/FontsComponent.hpp`
+
+Enums:
+- `FontSourceType`: `LocalPath`, `Url`
+- `FontGlyphPreset`: `Default`, `Cyrillic`, `Japanese`, `Korean`, `ChineseFull`
+
+`FontFaceSpec` fields:
+- `Key`, `SourceType`, `Source`
+- `SizePx`
+- `OversampleH`, `OversampleV`
+- `PixelSnapH`, `MergeMode`
+- `RasterizerMultiply`
+- `GlyphPreset`
+- `ExtraGlyphs`
+- `MaxBytes` (default `8 MiB`)
+- `MaxRetryCount` (default `2`)
+- `RetryDelayMs` (default `350`)
+- `StartupRequired`
+
+`FontFaceSpec` methods:
+- `SetGlyphPreset(...)`
+- `SetOversample(h, v)`
+- `SetPixelSnapH(bool)`
+- `SetMergeMode(bool)`
+- `SetRasterizerMultiply(float)` (clamped `0.1..4.0`)
+- `SetExtraGlyphs(string)`
+- `SetMaxBytes(size_t)` (minimum `1024`)
+- `SetRetryPolicy(maxRetryCount, retryDelayMs)`
+- `SetStartupRequired(bool)`
+
+`FontsComponent` fields:
+- `Enabled`
+- `InheritFromParent`
+- `DefaultFaceKey` (empty means ImGui default)
+- apply targets:
+  - `ApplyToText`
+  - `ApplyToTextInput`
+  - `ApplyToOptions`
+  - `ApplyToStatusLabels`
+- reload controls:
+  - `AutoReloadLocalFiles`
+  - `ReloadPollSeconds` (minimum `0.05`)
+  - `ReloadRequested`
+- `Faces`
+
+`FontsComponent` methods:
+- `SetEnabled`, `SetDefaultFace`, `SetDefaultFaceSafe`
+- `SetInheritFromParent`
+- `SetApplyToText`, `SetApplyToTextInput`, `SetApplyToOptions`, `SetApplyToStatusLabels`
+- `SetAutoReloadLocalFiles`
+- `SetReloadPollSeconds`
+- `RequestReload`
+- `AddPathFace(key, path, sizePx)`
+- `AddUrlFace(key, httpsUrl, sizePx)`
+- `FindFace`, `GetFaceKeys`, `FindFaceIndex`, `HasFace`
+
+### Font System Runtime API
+
+Header: `src/Render/RenderUtils/FontSystem.hpp`
+
+Types:
+- `FontApplyTarget`: `Text`, `TextInput`, `Options`, `StatusLabel`
+- `FontLoadProgress`
+- `FontFaceRuntimeState`: `Missing`, `Loading`, `Ready`, `Failed`
+- `FontFaceRuntimeInfo`: `Key`, `State`, `Inherited`, `IsDefault`
+
+Methods:
+- `Register(registry)`
+- `Shutdown(registry)`
+- `Update(registry)` (async state polling only)
+- `ProcessPendingAtlasRebuild()` (safe pre-`NewFrame` rebuild apply)
+- `QueryProgress(registry)`
+- `QueryEntityFontFaces(registry, entity, includeInherited)`
+- `SetEntityDefaultFace(registry, entity, key)` (empty key => ImGui default)
+- `ShouldApply(...)`
+- `ResolveEntityFont(...)`
+- `CalcTextSize(...)`
+- `AddText(...)`
+
+Font fallback chain:
+- span `FontKey` -> `TextComponent::FontKey` -> nearest inherited `FontsComponent.DefaultFaceKey` -> ImGui default font.
+
+Critical safety rule:
+- Atlas rebuild is deferred and applied before ImGui `NewFrame`.
+- Never rebuild font atlas in the middle of active ImGui frame.
+
+## Shader System
+
+Headers:
 - `src/Render/RenderUtils/Components/ShaderComponent.hpp`
+- `src/Render/RenderUtils/ShaderSystem.hpp`
 
-Source modes:
-- `EmbeddedCpp` / `EmbeddedRust`: resolve compile-time embedded/file-aliased keys.
-- `File`: load external shader file path.
-- `Inline`: currently disabled by policy at runtime (returns deterministic error).
+### Shader Component Types
 
-Compile policies:
-- `OnDemandCache`
-- `StartupPrecompile`
-- `ManualApply`
+Enums:
+- `ShaderSourceMode`: `EmbeddedCpp`, `EmbeddedRust`, `File`, `Inline`
+- `ShaderBackendMode`: `AutoPreferDXC`, `D3DCompileOnly`, `DXCOnly`
+- `ShaderCompilePolicy`: `OnDemandCache`, `StartupPrecompile`, `ManualApply`
+- `ShaderStageMode`: `PixelOnly`, `VertexAndPixel`
+- `ShaderParamType`: `Float`, `Int`, `Vec2`, `Vec3`, `Vec4`, `Color`, `Bool`
+- `ShaderAutoUniform`:
+  - `TimeSeconds`, `DeltaSeconds`, `MousePos`, `DisplaySize`, `EntityMin`, `EntityMax`, `EntitySize`, `EntityRect`
+- `ShaderBindingMode`:
+  - `Literal`, `BuiltinAutoUniform`, `RegisteredAutoUniform`
 
-Backend modes:
-- `AutoPreferDXC`
-- `D3DCompileOnly`
-- `DXCOnly`
+Structs:
+- `ShaderParameter`
+  - `Name`, `Type`, `Value`, `BindingMode`, `UniformKey`, `AutoUniform`, `ExposedInInspector`
+- `ShaderSourceSpec`
+  - `Mode`, `KeyOrPathOrInline`, `EntryPoint`, `TargetProfile`
+- `ShaderComponent`
+  - `Enabled`, `StageMode`, `Backend`, `CompilePolicy`
+  - `VertexSource`, `PixelSource`
+  - `Parameters`
+  - compile state fields: `Dirty`, `CompileRequested`, `AutoReloadFileChanges`, `IsCompiled`, `LastError`, `ProgramHandle`
 
-CPU fallback:
-- If source resolution, compile, or runtime execution fails, effect paths fall back to CPU render path and error details are written into `ShaderComponent::LastError`.
+Builder utilities:
+- `ShaderParamBuilder`:
+  literal setters (`Float`, `Int`, `Vec2`, `Vec3`, `Vec4`, `Color`, `Bool`)
+  built-in auto setters (`AutoFloat`, `AutoVec2`, `AutoVec4`)
+  registered uniform bindings (`BindFloat`, `BindInt`, `BindVec2`, `BindVec4`, `BindColor`, `BindBool`)
+  plus `BuildCBufferHlsl(...)` and `BuildPackedCBuffer(...)`.
 
-Uniform resolver example:
+### ShaderSystem Runtime API
 
-```cpp
-RenderUtils::ShaderSystem::RegisterUniformResolver(
-    "app.mouse_norm",
-    [](const RenderUtils::ShaderAutoUniformContext& ctx,
-       RenderUtils::ShaderParamType expected,
-       RenderUtils::ShaderParamValue& outValue,
-       std::string& outError) -> bool {
-        if (expected != RenderUtils::ShaderParamType::Vec2) {
-            outError = "app.mouse_norm expects Vec2";
-            return false;
-        }
-        outValue = ImVec2(
-            ctx.MousePos.x / (std::max)(1.0f, ctx.DisplaySize.x),
-            ctx.MousePos.y / (std::max)(1.0f, ctx.DisplaySize.y));
-        return true;
-    });
-```
+Initialization:
+- `Initialize(device)`
+- `Shutdown()`
 
-Shipped default embedded shader keys:
-- `shader.default.vs`
-- `glow.default`
-- `shadow.default`
+Source registries:
+- `RegisterSourceAlias`, `UnregisterSourceAlias`, `ResetDefaultSourceAliases`
+- `RegisterEmbeddedSource`, `UnregisterEmbeddedSource`, `ResetDefaultEmbeddedSources`
 
-Glow clipping behavior:
-- `GlowComponent` now defaults to non-parent-clipped spill (`ClipToParent = false`) for natural bloom tails.
-- Use `SetClipToParent(true)` when strict parent-bound clipping is required.
+Uniform registry:
+- `RegisterUniformResolver`
+- `UnregisterUniformResolver`
+- `ResetDefaultUniformResolvers`
+- `QueryUniformResolverKeys`
 
-Glow shader behavior:
-- `glow.default` uses an expanded invisible draw envelope (`gDrawMinMax`) with pre-edge fade-out to avoid rectangular plate artifacts.
-- `GlowComponent` shader packing uses `Params3 = (qualityIndex, supportRadiusPx, edgeFadePx, alphaEpsilon)`.
+Pass integration:
+- `BeginImGuiPass(cmd, rtv, displaySize)`
+- `EndImGuiPass()`
+- Queue APIs:
+  - `QueueEntity(...)`
+  - `TryQueueEntity(...)`
+  - `TryQueueEntityImGui(...)`
+- compile/update:
+  - `UpdateCompile(registry)`
+- draw:
+  - `RenderQueued(...)`
+  - `ClearQueue()`
 
-## Media / Image Loader Usage
+Diagnostics:
+- `QueryQueuedCount()`
+- `QueryImGuiCallbackQueuedCount()`
+- `QueryImGuiCallbackRuntimeFailureCount()`
 
-Header:
-- `src/Render/RenderUtils/Components/ImageLoaderComponent.hpp`
+Current policy notes:
+- Inline shader source mode is blocked by policy (deterministic error).
+- Shader failure falls back to CPU draw path where available, and writes error to `ShaderComponent::LastError`.
 
-Basic example:
+### Glow And Shadow (Shader Path Notes)
 
-```cpp
-Components::ImageLoader loader;
-loader.AddUrl("https://example.com/image.png");
-loader.AddPath("assets/local_preview.png");
-loader.SetActiveSource(0);
-loader.StartupRequired = true;
-loader.CycleMode = Components::ImageLoader::SourceCycleMode::CycleLoadedOnly;
-loader.SetPlayback(true, true, false, 1.0f); // autoplay, loop, paused, speed
-```
+`GlowComponent` (`src/Render/RenderUtils/Components/GlowComponent.hpp`):
+- Defaults:
+  - `RenderMode = Shader`
+  - `ShaderKey = "glow.default"`
+  - `ClipToParent = false` (spill-first natural glow behavior)
+- Modes:
+  - `GaussianBloom`, `NeonTube`, `AmbientSoft`
+- Quality:
+  - `Performance`, `Balanced`, `Ultra`
+- Supports literal + auto + bound shader params through `Param*`, `ParamAuto*`, `ParamBind*`.
 
-Capabilities:
-- URL + local-path sources.
-- Multi-source preloading.
-- GIF/animated frame playback.
-- Retry/fallback controls.
-- Startup-required participation in startup gate.
+`glow.default` shader behavior:
+- Uses expanded invisible envelope (`gDrawMinMax`) for draw region.
+- Uses support radius and container-edge fade masks to force energy to zero before envelope edge.
+- Final support packing in `Params3`:
+  - `x = qualityIndex`
+  - `y = supportRadiusPx`
+  - `z = edgeFadePx`
+  - `w = alphaEpsilon`
 
-## Component Reference (Practical)
+`ShadowComponent`:
+- Defaults:
+  - `RenderMode = Cpu`
+  - `ShaderKey = "shadow.default"`
+  - `ClipToParent = true`
 
-All primary component headers live in:
-- `src/Render/RenderUtils/Components`
+## Image/Media Loader System
 
-| Category | Component | Purpose | Header |
-|---|---|---|---|
-| Layout/Core | `ContainerComponent` | Entity container type/name metadata | `src/Render/RenderUtils/Components/ContainerComponent.hpp` |
-| Layout/Core | `TransformComponent` | Position, size, rotation | `src/Render/RenderUtils/Components/TransformComponent.hpp` |
-| Layout/Core | `ParentComponent` | Parent-child hierarchy + offsets | `src/Render/RenderUtils/Components/ParentComponent.hpp` |
-| Layout/Core | `StyleComponent` | Colors, border, rounding, gradient, outline, padding | `src/Render/RenderUtils/Components/StyleComponent.hpp` |
-| Layout/Core | `ClipComponent` | Child clipping behavior | `src/Render/RenderUtils/Components/ClipComponent.hpp` |
-| Text/Input | `TextComponent` | Text content + alignment/layout settings | `src/Render/RenderUtils/Components/TextComponent.hpp` |
-| Text/Input | `TextInputComponent` | Editable text input behavior/state | `src/Render/RenderUtils/Components/TextInputComponent.hpp` |
-| Text/Input | `InputStateComponent` | Hover/click edge states and blocking | `src/Render/RenderUtils/Components/InputStateComponent.hpp` |
-| Text/Input | `OptionsComponent` | Segmented options/select control | `src/Render/RenderUtils/Components/OptionsComponent.hpp` |
-| Text/Input | `SliderComponent` | Slider value and visuals | `src/Render/RenderUtils/Components/SliderComponent.hpp` |
-| Interaction | `DraggableComponent` | Drag mode/constraints | `src/Render/RenderUtils/Components/DraggableComponent.hpp` |
-| Interaction | `CollisionComponent` | UI collision/hit bounds options | `src/Render/RenderUtils/Components/CollisionComponent.hpp` |
-| Interaction | `LockedComponent` | Interaction locking | `src/Render/RenderUtils/Components/LockedComponent.hpp` |
-| Interaction | `ScrollComponent` | Scroll area state/config | `src/Render/RenderUtils/Components/ScrollComponent.hpp` |
-| Interaction | `ExpandComponent` | Expand/collapse state behavior | `src/Render/RenderUtils/Components/ExpandComponent.hpp` |
-| Interaction | `DrawAboveComponent` | Draw-above dependency by target entity | `src/Render/RenderUtils/Components/DrawAboveComponent.hpp` |
-| Tabs/Views | `TabSwitchComponent` | Tab panel visibility control | `src/Render/RenderUtils/Components/TabSwitchComponent.hpp` |
-| Tabs/Views | `TabTriggerComponent` | Tab trigger behavior/colors | `src/Render/RenderUtils/Components/TabTriggerComponent.hpp` |
-| Visual FX | `GlowComponent` | Glow effect config (CPU/shader path) | `src/Render/RenderUtils/Components/GlowComponent.hpp` |
-| Visual FX | `ShadowComponent` | Shadow effect config (CPU/shader path) | `src/Render/RenderUtils/Components/ShadowComponent.hpp` |
-| Visual FX | `ShapeComponent` | Primitive shape drawing/hit test | `src/Render/RenderUtils/Components/ShapeComponent.hpp` |
-| Visual FX | `TransparencyComponent` | Entity alpha multiplier | `src/Render/RenderUtils/Components/TransparencyComponent.hpp` |
-| Visual FX | `WindowHeaderComponent` | Optional window header rendering/drag zone | `src/Render/RenderUtils/Components/WindowHeaderComponent.hpp` |
-| Animation | `AnimationComponent` | Keyed animation runtime storage/control | `src/Render/RenderUtils/Components/AnimationComponent.hpp` |
-| Shader | `ShaderComponent` | Shader source/policy/backend/parameters | `src/Render/RenderUtils/Components/ShaderComponent.hpp` |
-| Media | `ImageLoader` | Async media/image loading + GIF playback | `src/Render/RenderUtils/Components/ImageLoaderComponent.hpp` |
+Header: `src/Render/RenderUtils/Components/ImageLoaderComponent.hpp`
 
-Related custom extension:
-- `src/Render/RenderUtils/CustomComponents/CustomComponent.hpp`
+`Components::ImageLoader` supports:
+- multi-source (`URL` + `LocalPath`)
+- static images and animated media (GIF)
+- per-source runtime tracking, retry/backoff, staged decode/upload
+- source cycling behavior and fallback to last successful source
 
-Aggregate include:
-- `src/Render/RenderUtils/UIComponents.hpp`
+Public high-level fields you normally set:
+- source control:
+  - `Sources`, `ActiveSourceIndex`
+  - `CycleMode` (`CycleLoadedOnly`, `CycleAllSources`, `RefetchOnClick`)
+  - `PreloadAllSources`
+- playback:
+  - `AutoPlay`, `Loop`, `Paused`, `PlaybackSpeed`
+- startup:
+  - `StartupRequired`
+- resilience:
+  - `KeepLastSuccessfulTexture`
+  - `SkipFailedSources`
+  - `MaxRetryCount`, `RetryDelayMs`
+- GIF upload budgets:
+  - `AdaptiveGifUpload`
+  - `MaxGifUploadFramesPerTick`
+  - `MaxUploadBytesPerTick`
+  - `MaxResidentGifFrames`
+- restart debounce:
+  - `RestartDebounceMs`
+- status:
+  - `LastStatusMessage`
 
-## Troubleshooting
+Builder helpers:
+- `AddUrl(url)`
+- `AddPath(path)`
+- `SetSources(...)`
+- `SetActiveSource(index)`
+- `SetPlayback(autoPlay, loop, paused, speed)`
 
-### Rust `ring` build error (`stddef.h` missing)
+System APIs (`Components::ImageLoaderSystem`):
+- lifecycle:
+  - `Register(registry)`
+  - `Shutdown(registry)`
+  - `Update(registry)`
+  - `FreeEntity(registry, entity)`
+- control:
+  - `RequestRestart(registry, hardRestart)`
+  - `CycleSource(registry, entity, direction)`
+- diagnostics:
+  - `QueryPendingRequestCount()`
+  - `QueryDebugStats(registry)`
+  - `QueryProgress(registry)`
+
+## Component Reference (All Public Components)
+
+All component headers:
+- `src/Render/RenderUtils/UIComponents.hpp` (aggregate include)
+- `src/Render/RenderUtils/Components/*.hpp`
+
+### Core/Layout
+
+`ContainerComponent`:
+- Fields:
+  - `Type` (`Window`, `Panel`, `Button`, `Label`)
+  - `Name`, `OwnedName`
+- Setters:
+  - `SetType(...)`
+  - `SetName(const char*)`
+  - `SetName(const std::string&)`
+
+`TransformComponent`:
+- Fields:
+  - `Position`, `Size`, `Scale`, `Pivot`, `Rotation`
+- Setters:
+  - `SetPosition`, `SetSize`, `SetScale(ImVec2)`, `SetScale(float)`, `SetRotation`, `SetPivot`
+
+`ParentComponent`:
+- Fields:
+  - `RelativeOffset`, `ParentEntity`
+- Setters:
+  - `SetParent`, `SetRelativeOffset`
+
+`StyleComponent`:
+- Fields:
+  - colors: `BackgroundColor`, `BorderColor`, gradient colors, outline color
+  - geometry: `BorderSize`, `Rounding`, `RoundingFlags`
+  - visibility: `Visible`, `CalculatedVisible`
+  - depth: `Layer` (`ZOrder`) and `ZIndexInt`
+  - content padding: `ContentPaddingX`, `ContentPaddingY`
+- Setters:
+  - `SetBackgroundColor`, `SetBorderColor`, `SetBorderSize`
+  - `SetRounding`, `SetRoundingFlags`
+  - `SetVisible`
+  - `SetLayer`
+  - `SetGradient`, `SetGradientTopColor`, `SetGradientBottomColor`
+  - `SetOutline`, `SetOutlineColor`, `SetOutlineThickness`
+  - `SetContentPadding`
+
+`ClipComponent`:
+- Field: `ClipChildren`
+- Setter: `SetClipChildren`
+
+`TransparencyComponent`:
+- Field: `Alpha`
+- Setter: `SetAlpha`
+
+`DrawAboveComponent`:
+- Field: `TargetEntityName` (`const char*`)
+- Setter: `SetTargetEntityName`
+- Important: this stores a raw pointer; use string literals or stable storage lifetime.
+
+`ExpandComponent`:
+- Fields:
+  - `IsExpanded`
+  - `ExpandedHeight`
+  - `CurrentHeight`
+  - `ClipToParent`
+  - `Direction` (`Down`, `Up`)
+- Setters:
+  - `SetExpanded`, `SetExpandedHeight`, `SetClipToParent`, `SetDirection`
+
+`ScrollComponent`:
+- Fields:
+  - `ScrollY`, `ContentHeight`, `ViewHeight`, `ShowScrollbar`, `Speed`
+- Setters:
+  - `SetScrollY`, `SetContentHeight`, `SetViewHeight`, `SetShowScrollbar`, `SetSpeed`
+
+### Input/Interaction
+
+`InputStateComponent`:
+- Fields:
+  - hover/click states:
+    - `IsHovered`, `IsClicked`
+    - `WasHovered`, `WasClicked`
+    - `JustPressed`, `JustReleased`
+  - behavior:
+    - `BlockInput`
+    - `ClipRect`
+- Setters:
+  - `SetHovered`, `SetClicked`, `SetBlockInput`
+
+`DraggableComponent`:
+- Fields:
+  - `IsDragging`, `DragOffset`
+  - `Mode` (`None`, `Free`, `HorizontalOnly`, `VerticalOnly`)
+  - `Constraint` (`None`, `Parent`, `Window`, `Screen`)
+- Setters:
+  - `SetMode`, `SetConstraint`, `SetDragOffset`, `SetDragging`
+
+`CollisionComponent`:
+- Field: `Collides`
+- Setter: `SetCollides`
+
+`LockedComponent`:
+- Field: `Locked`
+- Setter: `SetLocked`
+
+`OptionsComponent`:
+- Fields:
+  - `Options`
+  - `SelectedIndex`
+  - `OnSelectCallback`
+- Setters:
+  - `SetOptions`, `SetSelectedIndex`, `SetCallback`
+
+`SliderComponent`:
+- Fields:
+  - values: `Value`, `Min`, `Max`, `DataType`
+  - smoothing: `VisualValue`, `EnableSmoothing`, `SmoothingSpeed`
+  - drag: `IsDragging`
+  - style: `TrackHeight`, `KnobRadius`, `ColorTrack`, `ColorFill`, `ColorKnob`
+  - interaction: `ScrollSensitivity`
+  - callback: `OnChange`
+- Setters:
+  - `SetValue`, `SetRange`, `SetDataType`
+  - `SetColors`, `SetSizes`
+  - `SetSmoothing`, `SetSensitivity`, `SetOnChange`
+  - `AsInt`
+
+`TextInputComponent`:
+- Fields:
+  - `Buffer`, `Placeholder`, `MaxLength`
+  - `IsFocused`, `CursorPos`
+  - `OnChange`
+- Setters:
+  - `SetBuffer`, `SetPlaceholder`, `SetMaxLength`, `SetOnChange`
+- Input note:
+  - text queue currently accepts printable single-byte ASCII (`< 0x80`).
+
+`TabSwitchComponent`:
+- Fields: `TargetTabId`, `Active`
+- Setter: `SetTargetTabId`
+
+`TabTriggerComponent`:
+- Fields: `TabId`, `ActiveColor`, `InactiveColor`
+- Setters: `SetTabId`, `SetColors`
+
+`WindowHeaderComponent`:
+- Fields:
+  - `Enabled`, `Height`
+  - colors: `BackgroundColor`, `TextColor`, `SeparatorColor`
+  - `PaddingX`, `PaddingY`
+  - `ShowTitle`
+  - `DragFromHeaderOnly`
+  - `ClipChildrenBelowHeader`
+- Setters:
+  - `SetEnabled`, `SetHeight`
+  - `SetBackgroundColor`, `SetTextColor`, `SetSeparatorColor`
+  - `SetPadding`, `SetShowTitle`
+  - `SetDragFromHeaderOnly`
+  - `SetClipChildrenBelowHeader`
+
+### Text/Animation
+
+`TextComponent` and `FontsComponent` are documented in [Text + Fonts](#text--fonts).
+
+`AnimationComponent`:
+- Stores `std::vector<Animation>`
+- Methods:
+  - `AddAnimation(const Animation&)`
+  - `AddAnimationEx(Animation)` (returns generated ID)
+  - `CancelById(int)`
+  - `CancelByTag(const std::string&)`
+  - `ClearAll()`
+
+`Animation` fields:
+- identity: `ID`, `Tag`
+- timing: `Duration`, `Elapsed`, `StartTime`, `Loop`, `Finished`
+- easing: `Easing`
+- value range: `StartVal`, `EndVal`
+- callbacks:
+  - `Apply(const AnimationValue&)`
+  - `CustomUpdate(float easedT, entt::registry&, entt::entity)`
+  - `OnComplete()`
+
+`EasingType`:
+- `Linear`
+- `EaseInQuad`, `EaseOutQuad`, `EaseInOutQuad`
+- `EaseInCubic`, `EaseOutCubic`, `EaseInOutCubic`
+- `ElasticOut`, `BounceOut`
+
+### Visual Effects
+
+`ShapeComponent`:
+- Fields:
+  - `Shapes`
+  - `Enabled`
+  - `DrawBehindContent`
+  - `ClipToEntity`
+  - `UseForHitTest`
+  - `Priority`
+  - `OnDrawOverride`
+- Methods:
+  - `AddShape`, `ClearShapes`
+  - `SetEnabled`
+  - `SetDrawBehindContent`
+  - `SetClipToEntity`
+  - `SetUseForHitTest`
+  - `SetPriority`
+  - `SetOnDrawOverride`
+
+`ShapePrimitive`:
+- `Type` (`Rect`, `Circle`, `Line`, `Triangle`, `Polyline`)
+- `Points`, `Offset`, `Size`, `Radius`
+- rect rounding:
+  - `Rounding`, `RoundingFlags`
+- style:
+  - `Filled`, `FillColor`
+  - `StrokeEnabled`, `StrokeColor`, `StrokeThickness`
+- `Visible`
+
+`GlowComponent`:
+- key fields:
+  - `Enabled`
+  - `Color`
+  - `Radius`
+  - `Intensity`
+  - `RenderMode` (`Cpu`/`Shader`)
+  - `ShaderKey` (default `"glow.default"`)
+  - `ShaderParameters`
+  - `ClipToParent` (default `false`)
+  - `Mode`
+  - `QualityMode`
+  - `Falloff`
+  - `CoreStrength`
+  - `InnerGlow`
+  - `OuterOnly`
+  - `RadiusScale`
+  - sample/cache controls: `Samples`, `CacheEnabled`, `MaxSamples`
+- fluent methods:
+  - base: `SetColor`, `SetRadius`, `SetIntensity`, `SetSamples`, `SetEnabled`, `SetMode`, `SetRenderMode`, `SetShaderKey`, `SetClipToParent`, `SetQualityMode`, `SetFalloff`, `SetCoreStrength`, `SetInnerGlow`, `SetOuterOnly`, `SetRadiusScale`
+  - shader param set: `SetShaderParameters`, `ConfigureShaderParameters`, `ClearShaderParameters`
+  - shader param literals: `ParamFloat`, `ParamInt`, `ParamVec2`, `ParamVec4`, `ParamColor`, `ParamBool`
+  - built-in auto uniforms: `ParamAutoFloat`, `ParamAutoVec2`, `ParamAutoVec4`
+  - registered bindings: `ParamBindFloat`, `ParamBindInt`, `ParamBindVec2`, `ParamBindVec4`, `ParamBindColor`, `ParamBindBool`
+
+`ShadowComponent`:
+- key fields:
+  - `Enabled`, `Color`, `Offset`, `BlurRadius`, `Spread`, `Samples`, `Inset`
+  - `RenderMode` (`Cpu`/`Shader`)
+  - `ShaderKey` (default `"shadow.default"`)
+  - `ShaderParameters`
+  - `ClipToParent` (default `true`)
+- methods mirror glow parameter APIs (`Set*`, `Param*`, `ParamAuto*`, `ParamBind*`).
+
+`ShaderComponent`:
+- documented in [Shader System](#shader-system).
+
+### Media
+
+`Components::ImageLoader`:
+- documented in [Image/Media Loader System](#imagemedia-loader-system).
+
+## Rust FFI Reference
+
+Header: `src/RustComponents/RustBridge.hpp`
+
+Enums:
+- `ImageFetchStatus`:
+  - `Loading = 0`
+  - `Ready = 1`
+  - `Failed = 2`
+  - `InvalidId = 3`
+- `ImageSourceKind`:
+  - `Url = 0`
+  - `LocalPath = 1`
+- `FetchedMediaKind`:
+  - `StaticRGBA = 0`
+  - `AnimatedRGBA = 1`
+
+Key FFI functions:
+- Byte/raw:
+  - `start_fetch_bytes(source, source_kind)`
+  - `check_fetch_bytes_status_ex(...)`
+  - `free_rust_bytes(ptr, len)`
+- Media:
+  - `start_fetch_media(source, source_kind)`
+  - `check_fetch_media_status_ex(...)`
+  - `free_animation_frames(...)`
+- Image legacy:
+  - `start_fetch_image(url)`
+  - `check_fetch_status(...)`
+  - `check_fetch_status_ex(...)`
+  - `free_image_data(...)`
+- request lifecycle:
+  - `cancel_fetch_request(id)`
+
+Rust runtime notes (`src/RustComponents/src/lib.rs`):
+- Asynchronous fetches are handled on worker threads.
+- URL and local path loading are both supported by bridge; higher-level systems may apply stricter policies (for example, fonts require HTTPS in `FontSystem`).
+
+## Diagnostics And Troubleshooting
+
+### 1) Font crash at `g.Font->ContainerAtlas` (null)
 
 Symptom:
-- Rust build fails in `ring` with `fatal error C1083: Cannot open include file: 'stddef.h'`.
+- crash during `ImGui::Begin` with `g.Font->ContainerAtlas` null.
 
 Cause:
-- Build invoked without MSVC developer environment variables.
+- atlas rebuild happened at unsafe time (during active ImGui frame).
 
-Fix:
-- Build from `vcvars64.bat` initialized shell.
+Current fix in this codebase:
+- `FontSystem::Update` only marks pending rebuild.
+- `FontSystem::ProcessPendingAtlasRebuild()` executes rebuild at safe frame boundary before `ImguiRender::NewFrame`.
 
-```powershell
-cmd /c "\"C:\Program Files\Microsoft Visual Studio\18\Community\VC\Auxiliary\Build\vcvars64.bat\" && cmake --build out\build\x64-Debug --config Debug --target ImGuiDX12App"
-```
+If this returns:
+- Ensure you are not adding any immediate atlas rebuild calls from `UIRenderer::Update` or custom per-frame callbacks.
 
-### Corrosion/Rust toolchain detection issues
-
-This project already resolves real rust toolchain binaries in CMake (`rustup which rustc` / `rustup which cargo`) and disables rustup toolchain descent parsing for Corrosion.
-
-If configuration is still stale:
-- delete cache artifacts:
-  - `out/build/<config>/CMakeCache.txt`
-  - `out/build/<config>/CMakeFiles/`
-- reconfigure and rebuild.
-
-### Shader effect not rendering
+### 2) Shader effect missing or fallback path used
 
 Check:
 - `ShaderComponent::IsCompiled`
 - `ShaderComponent::LastError`
-- selected render mode (`GlowRenderMode` / `ShadowRenderMode`)
-- compile policy (`ManualApply` requires explicit compile request).
+- compile policy (`ManualApply` requires `RequestCompile()`)
+- source mode (`Inline` is blocked by policy)
+- callback failure metric:
+  - `ShaderSystem::QueryImGuiCallbackRuntimeFailureCount()`
 
-## Development Notes
+### 3) Glow appears clipped/boxed unexpectedly
 
-- Strict warning policy is enabled for project target:
-  - MSVC `/W4 /WX`
-- Rust side check:
+Check:
+- `GlowComponent::ClipToParent`
+  - `false` => spill allowed
+  - `true` => strict clip
+- shader key is `glow.default`
+- ensure envelope params are reaching shader path (if shader path disabled, CPU fallback appearance differs).
+
+### 4) Image not loading
+
+Check:
+- `ImageLoader.LastStatusMessage`
+- `ImageLoader.state`
+- source list validity (`Sources` non-empty)
+- debug stats:
+  - `Components::ImageLoaderSystem::QueryDebugStats(registry)`
+- progress:
+  - `Components::ImageLoaderSystem::QueryProgress(registry)`
+
+### 5) Text/font not switching
+
+Check:
+- nearest enabled `FontsComponent` and `InheritFromParent` path
+- `DefaultFaceKey` and requested keys are present
+- apply flags:
+  - `ApplyToText`
+  - `ApplyToTextInput`
+  - `ApplyToOptions`
+  - `ApplyToStatusLabels`
+- runtime states:
+  - `FontSystem::QueryEntityFontFaces(...)`
+
+### 6) Rust build failure (`stddef.h` / MSVC headers)
+
+Build from MSVC environment:
 
 ```powershell
-cargo check --manifest-path src/RustComponents/Cargo.toml
+cmd /c "\"C:\Program Files\Microsoft Visual Studio\18\Community\VC\Auxiliary\Build\vcvars64.bat\" && cmake --build out/build/x64-Debug --config Debug --target ImGuiDX12App"
 ```
 
-- Main demo scene and runtime orchestration are in:
-  - `src/MainRendering.cpp`
+If toolchain cache is stale:
+- delete:
+  - `out/build/<config>/CMakeCache.txt`
+  - `out/build/<config>/CMakeFiles/`
+- reconfigure.
+
+## Strict Warning Policy
+
+Defined in `CMakeLists.txt` for target `ImGuiDX12App`.
+
+Options:
+- `IMGUI_DX12APP_WARNINGS_AS_ERRORS` (default `ON`)
+- `IMGUI_DX12APP_ULTRA_WARNING_PROFILE` (default `ON`)
+
+MSVC baseline:
+- `/W4 /permissive-`
+
+MSVC ultra profile (first-party target):
+- `/sdl`
+- `/Zc:preprocessor`
+- `/Zc:__cplusplus`
+- `/external:anglebrackets /external:W0`
+- extra diagnostics (`/w14242 ... /w14928`)
+
+Non-MSVC baseline:
+- `-Wall -Wextra -Wpedantic`
+
+Non-MSVC ultra:
+- `-Wconversion -Wsign-conversion -Wshadow -Wformat=2 -Wnull-dereference -Wimplicit-fallthrough`
+
+Warnings-as-errors:
+- MSVC: `/WX`
+- Non-MSVC: `-Werror`
+
+## Practical Safety Rules
+
+- Keep ImGui context-sensitive operations on main/render thread.
+- Do not rebuild font atlas during active ImGui frame.
+- Prefer stable strings for any `const char*` pointer fields (especially `DrawAboveComponent::TargetEntityName`).
+- For custom callbacks:
+  - guard entity validity (`registry.valid(entity)`) when callbacks can outlive assumptions.
+  - avoid heavy blocking I/O.
+- Use startup blocking mode when app correctness depends on required assets.
+- Use diagnostics counters regularly:
+  - shader callback runtime failure count
+  - image loader debug stats
+  - startup combined progress (images + fonts)
+
+## Main Demo Reference
+
+End-to-end usage examples live in:
+- `src/MainRendering.cpp`
+
+This file demonstrates:
+- tabbed UI layout
+- glow/shadow/shader usage
+- image loader usage
+- custom component callbacks
+- font component setup and runtime font switching patterns
+- startup runtime configuration
 
 ## License
 

@@ -43,6 +43,10 @@ extern "C" {
     // Starts fetching media from either URL or local path.
     uint64_t start_fetch_media(const char* source, int32_t source_kind);
 
+    // Starts fetching raw source bytes (URL/local path).
+    // Returns a unique ID for the fetch operation.
+    uint64_t start_fetch_bytes(const char* source, int32_t source_kind);
+
     // Cancels and removes a pending fetch request from the shared map.
     // Safe to call for completed/invalid IDs (no-op).
     void cancel_fetch_request(uint64_t id);
@@ -75,6 +79,16 @@ extern "C" {
         int* out_height,
         AnimatedFrameFFI** out_frames,
         size_t* out_frame_count
+    );
+
+    // Byte status API:
+    // - Returns one of ImageFetchStatus values as int32_t.
+    // - On Ready, out_data/out_len are filled.
+    // - On Loading/Failed/InvalidId, out_data is set to nullptr.
+    int32_t check_fetch_bytes_status_ex(
+        uint64_t id,
+        uint8_t** out_data,
+        size_t* out_len
     );
 
     // Frees the memory allocated for the image data returned by check_fetch_status

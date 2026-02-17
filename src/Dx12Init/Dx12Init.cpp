@@ -1,5 +1,6 @@
 #include "Dx12Init.hpp"
 #include "Render/ImguiRender.hpp"
+#include "Render/RenderUtils/FontSystem.hpp"
 #include "Render/RenderUtils/ShaderSystem.hpp"
 #include "imgui.h"
 #include "imgui_impl_win32.h"
@@ -454,6 +455,7 @@ namespace DX12Init {
 
             ImGuiIO* io = nullptr;
             if (s_RuntimeState.ImGuiInitialized) {
+                RenderUtils::FontSystem::ProcessPendingAtlasRebuild();
                 ImguiRender::NewFrame();
                 io = &ImGui::GetIO();
             }

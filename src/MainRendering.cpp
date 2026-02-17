@@ -3,13 +3,16 @@
 #include "Render/RenderUtils/UIRenderer.hpp"
 #include "Render/RenderUtils/UIComponents.hpp"
 #include "Render/RenderUtils/UIBuilder.hpp"
+#include "Render/RenderUtils/FontSystem.hpp"
 #include "Render/RenderUtils/ShaderSystem.hpp"
 
 #include "imgui.h"
 #include <algorithm>
 #include <cassert>
 #include <cmath>
+#include <cstdio>
 #include <string>
+#include <vector>
 
 namespace MainRendering {
 
@@ -129,6 +132,32 @@ namespace MainRendering {
                 )
                 .With<RenderUtils::DraggableComponent>(RenderUtils::DraggableComponent().SetMode(RenderUtils::DragMode::Free))
                 .With<RenderUtils::ClipComponent>(RenderUtils::ClipComponent().SetClipChildren(true))
+                .With<RenderUtils::FontsComponent>([]() {
+                    RenderUtils::FontsComponent fonts;
+                    fonts
+                        .SetDefaultFace("ui.body")
+                        .SetInheritFromParent(true)
+                        .SetApplyToText(true)
+                        .SetApplyToTextInput(true)
+                        .SetApplyToOptions(true)
+                        .SetApplyToStatusLabels(true)
+                        .SetAutoReloadLocalFiles(true)
+                        .SetReloadPollSeconds(1.0f);
+                    fonts.AddPathFace("ui.body", "C:/Windows/Fonts/segoeui.ttf", 17.0f)
+                        .SetGlyphPreset(RenderUtils::FontGlyphPreset::Default)
+                        .SetStartupRequired(true);
+                    fonts.AddPathFace("ui.mono", "C:/Windows/Fonts/consola.ttf", 16.0f)
+                        .SetGlyphPreset(RenderUtils::FontGlyphPreset::Default);
+                    fonts.AddUrlFace(
+                        "ui.accent",
+                        "https://raw.githubusercontent.com/google/fonts/main/ofl/ibmplexmono/IBMPlexMono-Regular.ttf",
+                        18.0f)
+                        .SetGlyphPreset(RenderUtils::FontGlyphPreset::Default)
+                        .SetMaxBytes(8u * 1024u * 1024u)
+                        .SetRetryPolicy(2, 350.0f)
+                        .SetStartupRequired(false);
+                    return fonts;
+                }())
 
                 .Child(
                     RenderUtils::UIBuilder::Begin(g_registry)
@@ -222,21 +251,85 @@ namespace MainRendering {
                                     .With<RenderUtils::WindowHeaderComponent>(RenderUtils::WindowHeaderComponent().SetEnabled(false))
                                     .With<RenderUtils::TextComponent>(RenderUtils::TextComponent("WindowHeader disabled", IM_COL32(220, 228, 240, 255))))
                                 .Child(RenderUtils::UIBuilder::Begin(g_registry)
+                                    .Create<RenderUtils::ContainerType::Panel>("OverviewFontsCard")
+                                    .With<RenderUtils::TransformComponent>(RenderUtils::TransformComponent().SetPosition(ImVec2(428, 146)).SetSize(ImVec2(390, 250)))
+                                    .With<RenderUtils::StyleComponent>(RenderUtils::StyleComponent().SetBackgroundColor(IM_COL32(40, 44, 53, 255)).SetRounding(8.0f).SetBorderColor(IM_COL32(65, 70, 84, 255)).SetBorderSize(1.0f))
+                                    .With<RenderUtils::TextComponent>(RenderUtils::TextComponent("FontsComponent", IM_COL32(220, 230, 245, 255)).SetFont("ui.body"))
+                                    .Child(RenderUtils::UIBuilder::Begin(g_registry)
+                                        .Create<RenderUtils::ContainerType::Panel>("OverviewFontsRichText")
+                                        .With<RenderUtils::TransformComponent>(RenderUtils::TransformComponent().SetPosition(ImVec2(20, 56)).SetSize(ImVec2(350, 106)))
+                                        .With<RenderUtils::StyleComponent>(RenderUtils::StyleComponent().SetBackgroundColor(IM_COL32(0, 0, 0, 0)).SetContentPadding(0.0f, 0.0f))
+                                        .With<RenderUtils::TextComponent>(
+                                            RenderUtils::TextComponent("", IM_COL32(215, 228, 248, 255), RenderUtils::TextFlags::Wrap)
+                                                .SetFont("ui.body")
+                                                .SpanFont("Body face loaded locally. ", "ui.body", IM_COL32(215, 228, 248, 255))
+                                                .SpanFont("Mono span ", "ui.mono", IM_COL32(188, 244, 255, 255), RenderUtils::TextStyle::Bold)
+                                                .SpanFont("Accent span (HTTPS with fallback).", "ui.accent", IM_COL32(246, 210, 255, 255))))
+                                    .Child(RenderUtils::UIBuilder::Begin(g_registry)
+                                        .Create<RenderUtils::ContainerType::Panel>("OverviewFontsCustom")
+                                        .With<RenderUtils::TransformComponent>(RenderUtils::TransformComponent().SetPosition(ImVec2(20, 170)).SetSize(ImVec2(350, 62)))
+                                        .With<RenderUtils::StyleComponent>(RenderUtils::StyleComponent().SetBackgroundColor(IM_COL32(34, 39, 49, 255)).SetRounding(6.0f).SetBorderColor(IM_COL32(74, 88, 112, 255)).SetBorderSize(1.0f))
+                                        .With<RenderUtils::CustomComponent>(
+                                            RenderUtils::CustomComponent()
+                                                .SetOnRender([](entt::registry& reg, entt::entity e, ImDrawList* dl, ImVec2 pMin, ImVec2, bool hovered, bool) {
+                                                    ImFont* accent = RenderUtils::FontSystem::ResolveEntityFont(reg, e, "ui.accent");
+                                                    ImFont* mono = RenderUtils::FontSystem::ResolveEntityFont(reg, e, "ui.mono");
+                                                    RenderUtils::FontSystem::AddText(
+                                                        dl,
+                                                        accent,
+                                                        ImVec2(pMin.x + 12, pMin.y + 12),
+                                                        IM_COL32(232, 239, 255, 255),
+                                                        "Custom callback uses FontSystem helper.");
+                                                    if (hovered) {
+                                                        RenderUtils::FontSystem::AddText(
+                                                            dl,
+                                                            mono,
+                                                            ImVec2(pMin.x + 12, pMin.y + 34),
+                                                            IM_COL32(174, 238, 255, 255),
+                                                            "Hover: font resolved per-entity.");
+                                                    }
+                                                }))
+                                    )
+                                )
+                                .Child(RenderUtils::UIBuilder::Begin(g_registry)
+                                    .Create<RenderUtils::ContainerType::Panel>("OverviewFontSwitchCard")
+                                    .With<RenderUtils::TransformComponent>(RenderUtils::TransformComponent().SetPosition(ImVec2(428, 414)).SetSize(ImVec2(390, 140)))
+                                    .With<RenderUtils::StyleComponent>(
+                                        RenderUtils::StyleComponent()
+                                            .SetBackgroundColor(IM_COL32(40, 44, 53, 255))
+                                            .SetRounding(8.0f)
+                                            .SetBorderColor(IM_COL32(65, 70, 84, 255))
+                                            .SetBorderSize(1.0f))
+                                    .With<RenderUtils::TextComponent>(
+                                        RenderUtils::TextComponent("Runtime font switch", IM_COL32(220, 230, 245, 255)))
+                                    .Child(RenderUtils::UIBuilder::Begin(g_registry)
+                                        .Create<RenderUtils::ContainerType::Panel>("OverviewFontSwitchOptions")
+                                        .With<RenderUtils::TransformComponent>(RenderUtils::TransformComponent().SetPosition(ImVec2(20, 54)).SetSize(ImVec2(350, 34)))
+                                        .With<RenderUtils::StyleComponent>(RenderUtils::StyleComponent().SetContentPadding(4.0f, 4.0f).SetRounding(6.0f))
+                                        .With<RenderUtils::OptionsComponent>(RenderUtils::OptionsComponent({ "<ImGui Default>", "ui.body", "ui.mono", "ui.accent" }, 1)))
+                                    .Child(RenderUtils::UIBuilder::Begin(g_registry)
+                                        .Create<RenderUtils::ContainerType::Panel>("OverviewFontSwitchStatus")
+                                        .With<RenderUtils::TransformComponent>(RenderUtils::TransformComponent().SetPosition(ImVec2(20, 96)).SetSize(ImVec2(350, 30)))
+                                        .With<RenderUtils::StyleComponent>(RenderUtils::StyleComponent().SetBackgroundColor(IM_COL32(0, 0, 0, 0)).SetContentPadding(0.0f, 0.0f))
+                                        .With<RenderUtils::TextComponent>(RenderUtils::TextComponent("Active: ui.body", IM_COL32(190, 208, 235, 255)).SetFont("ui.body")))
+                                )
+                                .Child(RenderUtils::UIBuilder::Begin(g_registry)
                                     .Create<RenderUtils::ContainerType::Panel>("OverviewTransparencyBackdrop")
                                     .With<RenderUtils::TransformComponent>(RenderUtils::TransformComponent().SetPosition(ImVec2(18, 414)).SetSize(ImVec2(310, 120)))
                                     .With<RenderUtils::StyleComponent>(
                                         RenderUtils::StyleComponent()
                                             .SetBackgroundColor(IM_COL32(26, 30, 38, 255))
                                             .SetGradient(true, IM_COL32(86, 92, 112, 255), IM_COL32(22, 27, 36, 255))
+                                            .SetLayer(RenderUtils::ZOrder::Below)
                                             .SetRounding(8.0f)
                                             .SetBorderColor(IM_COL32(78, 88, 110, 255))
                                             .SetBorderSize(1.0f))
                                     .With<RenderUtils::TextComponent>(
-                                        RenderUtils::TextComponent("Background reference", IM_COL32(198, 210, 232, 255)).Align(RenderUtils::TextAlign::Center)))
+                                        RenderUtils::TextComponent("Transparency backdrop", IM_COL32(198, 210, 232, 255)).Align(RenderUtils::TextAlign::Center)))
                                 .Child(RenderUtils::UIBuilder::Begin(g_registry)
                                     .Create<RenderUtils::ContainerType::Panel>("OverviewTransparency")
                                     .With<RenderUtils::TransformComponent>(RenderUtils::TransformComponent().SetPosition(ImVec2(34, 432)).SetSize(ImVec2(278, 90)))
-                                    .With<RenderUtils::StyleComponent>(RenderUtils::StyleComponent().SetBackgroundColor(IM_COL32(74, 174, 255, 255)).SetRounding(8.0f))
+                                    .With<RenderUtils::StyleComponent>(RenderUtils::StyleComponent().SetBackgroundColor(IM_COL32(74, 174, 255, 255)).SetLayer(RenderUtils::ZOrder::Normal).SetRounding(8.0f))
                                     .With<RenderUtils::TransparencyComponent>(RenderUtils::TransparencyComponent(0.38f))
                                     .With<RenderUtils::TextComponent>(RenderUtils::TextComponent("Transparency alpha: 0.38", IM_COL32(15, 24, 35, 255))))
                         )
@@ -638,7 +731,7 @@ namespace MainRendering {
                                         .Create<RenderUtils::ContainerType::Panel>("SysModeOptions")
                                         .With<RenderUtils::TransformComponent>(RenderUtils::TransformComponent().SetPosition(ImVec2(20, 52)).SetSize(ImVec2(570, 38)))
                                         .With<RenderUtils::StyleComponent>(RenderUtils::StyleComponent().SetContentPadding(4.0f, 4.0f))
-                                        .With<RenderUtils::OptionsComponent>(RenderUtils::OptionsComponent({ "Block On Required Images", "Immediate UI" }, 0))
+                                        .With<RenderUtils::OptionsComponent>(RenderUtils::OptionsComponent({ "Block On Required Assets", "Immediate UI" }, 0))
                                     )
                                     .Child(RenderUtils::UIBuilder::Begin(g_registry)
                                         .Create<RenderUtils::ContainerType::Panel>("SysPriorityOptions")
@@ -790,6 +883,112 @@ namespace MainRendering {
             auto findEntity = [](const char* name) -> entt::entity {
                 return RenderUtils::UIRenderer::FindEntityByName(g_registry, name);
             };
+
+            auto fontStateLabel = [](RenderUtils::FontFaceRuntimeState state) -> const char* {
+                switch (state) {
+                case RenderUtils::FontFaceRuntimeState::Missing:
+                    return "missing";
+                case RenderUtils::FontFaceRuntimeState::Loading:
+                    return "loading";
+                case RenderUtils::FontFaceRuntimeState::Ready:
+                    return "ready";
+                case RenderUtils::FontFaceRuntimeState::Failed:
+                    return "failed";
+                default:
+                    return "unknown";
+                }
+            };
+
+            auto computeFontOptionIndex = [](const std::vector<std::string>& options, const std::string& key) -> int {
+                if (key.empty()) {
+                    return 0;
+                }
+                for (size_t i = 0; i < options.size(); ++i) {
+                    if (options[i] == key) {
+                        return static_cast<int>(i);
+                    }
+                }
+                return 0;
+            };
+
+            entt::entity showcaseEnt = findEntity("ModMenuShowcase");
+            entt::entity fontSwitchOptionsEnt = findEntity("OverviewFontSwitchOptions");
+            entt::entity fontSwitchStatusEnt = findEntity("OverviewFontSwitchStatus");
+            if (g_registry.valid(showcaseEnt) && g_registry.any_of<RenderUtils::FontsComponent>(showcaseEnt)) {
+                auto& showcaseFonts = g_registry.get<RenderUtils::FontsComponent>(showcaseEnt);
+                if (!showcaseFonts.DefaultFaceKey.empty() && !showcaseFonts.HasFace(showcaseFonts.DefaultFaceKey)) {
+                    showcaseFonts.DefaultFaceKey.clear();
+                }
+                std::vector<std::string> desiredOptions;
+                desiredOptions.emplace_back("<ImGui Default>");
+                const std::vector<std::string> faceKeys = showcaseFonts.GetFaceKeys();
+                desiredOptions.insert(desiredOptions.end(), faceKeys.begin(), faceKeys.end());
+
+                if (g_registry.valid(fontSwitchOptionsEnt) && g_registry.any_of<RenderUtils::OptionsComponent>(fontSwitchOptionsEnt)) {
+                    auto& options = g_registry.get<RenderUtils::OptionsComponent>(fontSwitchOptionsEnt);
+                    if (options.Options != desiredOptions) {
+                        options.Options = desiredOptions;
+                    }
+                    if (options.Options.empty()) {
+                        options.Options = desiredOptions;
+                    }
+                    if (options.SelectedIndex < 0) {
+                        options.SelectedIndex = 0;
+                    }
+                    if (options.SelectedIndex >= static_cast<int>(options.Options.size())) {
+                        options.SelectedIndex = computeFontOptionIndex(options.Options, showcaseFonts.DefaultFaceKey);
+                    }
+
+                    std::string requestedKey;
+                    if (options.SelectedIndex > 0 &&
+                        options.SelectedIndex < static_cast<int>(options.Options.size())) {
+                        requestedKey = options.Options[static_cast<size_t>(options.SelectedIndex)];
+                    }
+                    if (requestedKey != showcaseFonts.DefaultFaceKey) {
+                        showcaseFonts.SetDefaultFaceSafe(requestedKey);
+                    }
+
+                    const int syncedIndex = computeFontOptionIndex(options.Options, showcaseFonts.DefaultFaceKey);
+                    if (options.SelectedIndex != syncedIndex) {
+                        options.SelectedIndex = syncedIndex;
+                    }
+                }
+
+                RenderUtils::FontFaceRuntimeState activeState = RenderUtils::FontFaceRuntimeState::Ready;
+                if (!showcaseFonts.DefaultFaceKey.empty()) {
+                    activeState = RenderUtils::FontFaceRuntimeState::Missing;
+                    const std::vector<RenderUtils::FontFaceRuntimeInfo> infos =
+                        RenderUtils::FontSystem::QueryEntityFontFaces(g_registry, showcaseEnt, false);
+                    for (const auto& info : infos) {
+                        if (info.Key == showcaseFonts.DefaultFaceKey) {
+                            activeState = info.State;
+                            break;
+                        }
+                    }
+                }
+
+                if (g_registry.valid(fontSwitchStatusEnt) && g_registry.any_of<RenderUtils::TextComponent>(fontSwitchStatusEnt)) {
+                    auto& statusText = g_registry.get<RenderUtils::TextComponent>(fontSwitchStatusEnt);
+                    const std::string activeFaceLabel = showcaseFonts.DefaultFaceKey.empty()
+                        ? "<ImGui Default>"
+                        : showcaseFonts.DefaultFaceKey;
+                    const std::string nextText = "Active: " + activeFaceLabel + " (" + fontStateLabel(activeState) + ")";
+                    if (statusText.RawText != nextText) {
+                        statusText.RawText = nextText;
+                    }
+
+                    const ImU32 nextColor = activeState == RenderUtils::FontFaceRuntimeState::Ready
+                        ? IM_COL32(182, 228, 196, 255)
+                        : (activeState == RenderUtils::FontFaceRuntimeState::Loading
+                            ? IM_COL32(238, 220, 170, 255)
+                            : (activeState == RenderUtils::FontFaceRuntimeState::Failed
+                                ? IM_COL32(255, 178, 178, 255)
+                                : IM_COL32(190, 208, 235, 255)));
+                    if (statusText.Color != nextColor) {
+                        statusText.Color = nextColor;
+                    }
+                }
+            }
 
             // Systems tab -> runtime startup config sync
             entt::entity modeEnt = findEntity("SysModeOptions");
@@ -1027,19 +1226,22 @@ namespace MainRendering {
                 float alpha = g_registry.get<RenderUtils::TransparencyComponent>(transparencyEnt).Alpha;
                 if (alpha < 0.0f) alpha = 0.0f;
                 if (alpha > 1.0f) alpha = 1.0f;
-                std::string alphaText = std::to_string(alpha);
-                const size_t dot = alphaText.find('.');
-                if (dot != std::string::npos && dot + 3 < alphaText.size()) {
-                    alphaText.resize(dot + 3);
-                }
                 auto& text = g_registry.get<RenderUtils::TextComponent>(transparencyEnt);
-                text.RawText = "Transparency alpha: " + alphaText;
-                text.Color = IM_COL32(12, 20, 30, 255);
+                char alphaBuf[96] = {};
+                std::snprintf(alphaBuf, sizeof(alphaBuf), "Transparency alpha: %.2f", alpha);
+                const std::string nextText(alphaBuf);
+                if (text.RawText != nextText) {
+                    text.RawText = nextText;
+                }
+                const ImU32 nextColor = IM_COL32(12, 20, 30, 255);
+                if (text.Color != nextColor) {
+                    text.Color = nextColor;
+                }
             }
 
             const char* modeLabel = startupConfig.ModeValue == RenderUtils::StartupRuntime::Mode::ImmediateUI
                 ? "Immediate UI"
-                : "Block On Required Images";
+                : "Block On Required Assets";
             const char* priorityLabel = startupConfig.PriorityValue == RenderUtils::StartupRuntime::Priority::ImagesFirst
                 ? "Images First"
                 : (startupConfig.PriorityValue == RenderUtils::StartupRuntime::Priority::SystemsFirst ? "Systems First" : "Balanced");
@@ -1156,7 +1358,7 @@ namespace MainRendering {
                 ImGui::SetNextWindowSize(ImVec2(500, 170), ImGuiCond_Always);
                 ImGui::Begin("Startup Loading Overlay", nullptr,
                     ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings);
-                ImGui::Text("Loading required images...");
+                ImGui::Text("Loading required assets...");
                 ImGui::ProgressBar(startupState.Progress.percent, ImVec2(-1.0f, 0.0f));
                 ImGui::Text("Completed %d / %d",
                     startupState.Progress.readyRequired + startupState.Progress.failedRequired,

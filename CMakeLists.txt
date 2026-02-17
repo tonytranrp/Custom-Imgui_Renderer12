@@ -181,6 +181,8 @@ add_executable(ImGuiDX12App
     src/Render/ImguiRender.hpp
     src/Render/RenderUtils/UIRenderer.cpp
     src/Render/RenderUtils/UIRenderer.hpp
+    src/Render/RenderUtils/FontSystem.cpp
+    src/Render/RenderUtils/FontSystem.hpp
     src/Render/RenderUtils/ShaderSystem.cpp
     src/Render/RenderUtils/ShaderSystem.hpp
     src/Render/RenderUtils/UIComponents.hpp
@@ -210,8 +212,37 @@ target_link_libraries(ImGuiDX12App PRIVATE
 target_include_directories(ImGuiDX12App PRIVATE src)
 
 option(IMGUI_DX12APP_WARNINGS_AS_ERRORS "Treat project warnings as errors for ImGuiDX12App" ON)
+option(IMGUI_DX12APP_ULTRA_WARNING_PROFILE "Enable ultra-strict first-party warning profile for ImGuiDX12App" ON)
 if(MSVC)
     target_compile_options(ImGuiDX12App PRIVATE /W4 /permissive-)
+    if(IMGUI_DX12APP_ULTRA_WARNING_PROFILE)
+        target_compile_options(ImGuiDX12App PRIVATE
+            /sdl
+            /Zc:preprocessor
+            /Zc:__cplusplus
+            /external:anglebrackets
+            /external:W0
+            /w14242
+            /w14254
+            /w14263
+            /w14265
+            /w14287
+            /we4289
+            /w14296
+            /w14311
+            /w14545
+            /w14546
+            /w14547
+            /w14549
+            /w14555
+            /w14619
+            /w14640
+            /w14826
+            /w14905
+            /w14906
+            /w14928
+        )
+    endif()
     target_compile_options(ImGuiDX12App PRIVATE
         $<$<CONFIG:Release>:/O2 /Oi /Ot /Gy /Gw /GF /Zc:inline>
         $<$<CONFIG:RelWithDebInfo>:/O2 /Oi /Ot /Gy /Gw /GF /Zc:inline>
@@ -227,6 +258,16 @@ if(MSVC)
     endif()
 else()
     target_compile_options(ImGuiDX12App PRIVATE -Wall -Wextra -Wpedantic)
+    if(IMGUI_DX12APP_ULTRA_WARNING_PROFILE)
+        target_compile_options(ImGuiDX12App PRIVATE
+            -Wconversion
+            -Wsign-conversion
+            -Wshadow
+            -Wformat=2
+            -Wnull-dereference
+            -Wimplicit-fallthrough
+        )
+    endif()
     if(IMGUI_DX12APP_WARNINGS_AS_ERRORS)
         target_compile_options(ImGuiDX12App PRIVATE -Werror)
     endif()

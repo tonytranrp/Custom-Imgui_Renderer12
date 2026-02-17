@@ -1,6 +1,7 @@
 #include "UIRenderer.hpp"
 #include "Dx12Init/Dx12Init.hpp"
 #include "Components/ImageLoaderComponent.hpp" // Added for ImageLoader
+#include "FontSystem.hpp"
 #include "ShaderSystem.hpp"
 #include <unordered_map>
 #include <string>
@@ -69,6 +70,32 @@ namespace RenderUtils {
             const int a = (color >> 24) & 0xFF;
             const int scaledAlpha = static_cast<int>(static_cast<float>(a) * clampedMultiplier);
             return IM_COL32(r, g, b, scaledAlpha);
+        }
+
+        inline const char* FontSourceTypeLabel(FontSourceType type) {
+            switch (type) {
+            case FontSourceType::LocalPath:
+                return "Local";
+            case FontSourceType::Url:
+                return "URL";
+            default:
+                return "Unknown";
+            }
+        }
+
+        inline const char* FontFaceRuntimeStateLabel(FontFaceRuntimeState state) {
+            switch (state) {
+            case FontFaceRuntimeState::Missing:
+                return "Missing";
+            case FontFaceRuntimeState::Loading:
+                return "Loading";
+            case FontFaceRuntimeState::Ready:
+                return "Ready";
+            case FontFaceRuntimeState::Failed:
+                return "Failed";
+            default:
+                return "Unknown";
+            }
         }
 
         inline std::vector<entt::entity> SortCustomEntities(entt::registry& registry, bool requireInput) {
@@ -289,7 +316,110 @@ namespace RenderUtils {
                     }
                 }
             }
-            
+
+            // 5. Fonts Component
+            if (registry.all_of<FontsComponent>(s_SelectedEntity)) {
+                if (ImGui::CollapsingHeader("Fonts", ImGuiTreeNodeFlags_DefaultOpen)) {
+                    auto& fonts = registry.get<FontsComponent>(s_SelectedEntity);
+                    ImGui::Checkbox("Enabled##fonts", &fonts.Enabled);
+                    ImGui::Checkbox("Inherit From Parent##fonts", &fonts.InheritFromParent);
+                    ImGui::Checkbox("Apply To Text##fonts", &fonts.ApplyToText);
+                    ImGui::Checkbox("Apply To TextInput##fonts", &fonts.ApplyToTextInput);
+                    ImGui::Checkbox("Apply To Options##fonts", &fonts.ApplyToOptions);
+                    ImGui::Checkbox("Apply To Status Labels##fonts", &fonts.ApplyToStatusLabels);
+                    ImGui::Checkbox("Auto Reload Local Files##fonts", &fonts.AutoReloadLocalFiles);
+
+                    if (ImGui::DragFloat("Reload Poll Seconds##fonts", &fonts.ReloadPollSeconds, 0.05f, 0.05f, 10.0f)) {
+                        if (fonts.ReloadPollSeconds < 0.05f) {
+                            fonts.ReloadPollSeconds = 0.05f;
+                        }
+                    }
+                    ImGui::SameLine();
+                    if (ImGui::Button("Request Reload##fonts")) {
+                        fonts.RequestReload();
+                    }
+
+                    std::vector<FontFaceRuntimeInfo> runtimeFaces =
+                        FontSystem::QueryEntityFontFaces(registry, s_SelectedEntity, true);
+
+                    int selectedDefaultIndex = 0;
+                    if (!fonts.DefaultFaceKey.empty()) {
+                        for (size_t i = 0; i < runtimeFaces.size(); ++i) {
+                            if (runtimeFaces[i].Key == fonts.DefaultFaceKey) {
+                                selectedDefaultIndex = static_cast<int>(i) + 1;
+                                break;
+                            }
+                        }
+                    }
+
+                    std::string defaultPreview = selectedDefaultIndex <= 0
+                        ? std::string("<ImGui Default>")
+                        : runtimeFaces[static_cast<size_t>(selectedDefaultIndex - 1)].Key;
+                    if (ImGui::BeginCombo("Default Face##fonts", defaultPreview.c_str())) {
+                        const bool usingImguiDefault = fonts.DefaultFaceKey.empty();
+                        if (ImGui::Selectable("<ImGui Default>", usingImguiDefault)) {
+                            FontSystem::SetEntityDefaultFace(registry, s_SelectedEntity, "");
+                        }
+                        for (const auto& info : runtimeFaces) {
+                            std::string label = info.Key;
+                            if (info.Inherited) {
+                                label += " (inherited)";
+                            }
+                            const bool isSelected = fonts.DefaultFaceKey == info.Key;
+                            if (ImGui::Selectable(label.c_str(), isSelected)) {
+                                FontSystem::SetEntityDefaultFace(registry, s_SelectedEntity, info.Key);
+                            }
+                            if (isSelected) {
+                                ImGui::SetItemDefaultFocus();
+                            }
+                        }
+                        ImGui::EndCombo();
+                    }
+
+                    std::vector<FontFaceRuntimeInfo> localFaces =
+                        FontSystem::QueryEntityFontFaces(registry, s_SelectedEntity, false);
+
+                    if (ImGui::BeginTable(
+                        "FontsFaceTable",
+                        5,
+                        ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp)) {
+                        ImGui::TableSetupColumn("Key");
+                        ImGui::TableSetupColumn("Source");
+                        ImGui::TableSetupColumn("Size");
+                        ImGui::TableSetupColumn("State");
+                        ImGui::TableSetupColumn("Startup");
+                        ImGui::TableHeadersRow();
+
+                        for (const auto& face : fonts.Faces) {
+                            if (face.Key.empty()) {
+                                continue;
+                            }
+
+                            FontFaceRuntimeState state = FontFaceRuntimeState::Missing;
+                            for (const auto& info : localFaces) {
+                                if (info.Key == face.Key) {
+                                    state = info.State;
+                                    break;
+                                }
+                            }
+
+                            ImGui::TableNextRow();
+                            ImGui::TableSetColumnIndex(0);
+                            ImGui::TextUnformatted(face.Key.c_str());
+                            ImGui::TableSetColumnIndex(1);
+                            ImGui::TextUnformatted(FontSourceTypeLabel(face.SourceType));
+                            ImGui::TableSetColumnIndex(2);
+                            ImGui::Text("%.1f", face.SizePx);
+                            ImGui::TableSetColumnIndex(3);
+                            ImGui::TextUnformatted(FontFaceRuntimeStateLabel(state));
+                            ImGui::TableSetColumnIndex(4);
+                            ImGui::TextUnformatted(face.StartupRequired ? "Yes" : "No");
+                        }
+                        ImGui::EndTable();
+                    }
+                }
+            }
+             
             // 6. Glow Component
             if (registry.all_of<GlowComponent>(s_SelectedEntity)) {
                 if (ImGui::CollapsingHeader("Glow", ImGuiTreeNodeFlags_DefaultOpen)) {
@@ -959,9 +1089,11 @@ namespace RenderUtils {
 
     void UIRenderer::Init(entt::registry& registry) {
         Components::ImageLoaderSystem::Register(registry);
+        FontSystem::Register(registry);
     }
 
     void UIRenderer::Shutdown(entt::registry& registry) {
+        FontSystem::Shutdown(registry);
         Components::ImageLoaderSystem::Shutdown(registry);
         s_SelectedEntity = entt::null;
         s_HoveredDebugEntity = entt::null;
@@ -1081,11 +1213,12 @@ namespace RenderUtils {
         }
 
         // 3. Behavior-critical update order:
-        // UpdateAnimations -> CustomUpdate -> ResolveTransforms -> ResolveDepth -> UpdateInput -> OptionsUpdate -> ShaderUpdate -> CustomInput -> UpdateText -> UpdateImageLoader
+        // UpdateAnimations -> CustomUpdate -> ResolveTransforms -> ResolveDepth -> FontUpdate -> UpdateInput -> OptionsUpdate -> ShaderUpdate -> CustomInput -> UpdateText -> UpdateImageLoader
         UpdateAnimations(registry, deltaTime);
         InvokeCustomUpdateCallbacks(registry, deltaTime);
         ResolveTransforms(registry);
         ResolveDepth(registry);
+        FontSystem::Update(registry);
         UpdateInput(registry);
         OptionsSystem::Update(registry);
         ShaderSystem::UpdateCompile(registry);
@@ -1254,16 +1387,28 @@ namespace RenderUtils {
         ImDrawList* draw_list = ImGui::GetBackgroundDrawList();
         ShaderSystem::ClearQueue();
         
-        // 1. Sort Entities by ZIndex
-        registry.sort<StyleComponent>([](const auto& lhs, const auto& rhs) {
-            return lhs.ZIndexInt < rhs.ZIndexInt;
+        auto view = registry.view<const StyleComponent, const TransformComponent, const ContainerComponent>();
+        std::vector<entt::entity> sortedEntities;
+        sortedEntities.reserve(view.size_hint());
+        for (auto entity : view) {
+            sortedEntities.push_back(entity);
+        }
+        std::sort(sortedEntities.begin(), sortedEntities.end(), [&view](entt::entity lhs, entt::entity rhs) {
+            const auto& lhsStyle = view.get<const StyleComponent>(lhs);
+            const auto& rhsStyle = view.get<const StyleComponent>(rhs);
+            if (lhsStyle.ZIndexInt != rhsStyle.ZIndexInt) {
+                return lhsStyle.ZIndexInt < rhsStyle.ZIndexInt;
+            }
+            return entt::to_integral(lhs) < entt::to_integral(rhs);
         });
 
-        auto view = registry.view<const StyleComponent, const TransformComponent, const ContainerComponent>();
-        view.use<const StyleComponent>(); 
-
-        view.each([draw_list, &registry](const auto entity, const auto& style, const auto& transform, const auto& container) {
-            if (!style.CalculatedVisible) return;
+        for (auto entity : sortedEntities) {
+            const auto& style = view.get<const StyleComponent>(entity);
+            const auto& transform = view.get<const TransformComponent>(entity);
+            const auto& container = view.get<const ContainerComponent>(entity);
+            if (!style.CalculatedVisible) {
+                continue;
+            }
 
             ImVec2 p_min = transform.Position;
             ImVec2 p_max = ImVec2(p_min.x + transform.Size.x, p_min.y + transform.Size.y);
@@ -1539,24 +1684,38 @@ namespace RenderUtils {
                     const char* loadingText = loader.LastStatusMessage.empty()
                         ? "Loading image..."
                         : loader.LastStatusMessage.c_str();
-                    ImVec2 textSize = ImGui::CalcTextSize(loadingText);
+                    const bool applyStatusFonts = FontSystem::ShouldApply(registry, entity, FontApplyTarget::StatusLabel);
+                    ImFont* statusFont = applyStatusFonts ? FontSystem::ResolveEntityFont(registry, entity) : nullptr;
+                    ImVec2 textSize = FontSystem::CalcTextSize(statusFont, loadingText);
                     ImVec2 textPos = ImVec2(
                         imageMin.x + ((imageMax.x - imageMin.x) - textSize.x) * 0.5f,
                         imageMin.y + ((imageMax.y - imageMin.y) - textSize.y) * 0.5f
                     );
-                    draw_list->AddText(textPos, ScaleColorAlpha(IM_COL32(210, 210, 225, 255), entityAlpha), loadingText);
+                    FontSystem::AddText(
+                        draw_list,
+                        statusFont,
+                        textPos,
+                        ScaleColorAlpha(IM_COL32(210, 210, 225, 255), entityAlpha),
+                        loadingText);
                 } else if (!drawnImage) {
                     draw_list->AddRectFilled(imageMin, imageMax, ScaleColorAlpha(IM_COL32(65, 35, 35, 255), entityAlpha), 6.0f);
                     draw_list->AddRect(imageMin, imageMax, ScaleColorAlpha(IM_COL32(155, 70, 70, 255), entityAlpha), 6.0f);
                     const char* failText = loader.LastStatusMessage.empty()
                         ? "Image failed"
                         : loader.LastStatusMessage.c_str();
-                    ImVec2 textSize = ImGui::CalcTextSize(failText);
+                    const bool applyStatusFonts = FontSystem::ShouldApply(registry, entity, FontApplyTarget::StatusLabel);
+                    ImFont* statusFont = applyStatusFonts ? FontSystem::ResolveEntityFont(registry, entity) : nullptr;
+                    ImVec2 textSize = FontSystem::CalcTextSize(statusFont, failText);
                     ImVec2 textPos = ImVec2(
                         imageMin.x + ((imageMax.x - imageMin.x) - textSize.x) * 0.5f,
                         imageMin.y + ((imageMax.y - imageMin.y) - textSize.y) * 0.5f
                     );
-                    draw_list->AddText(textPos, ScaleColorAlpha(IM_COL32(245, 190, 190, 255), entityAlpha), failText);
+                    FontSystem::AddText(
+                        draw_list,
+                        statusFont,
+                        textPos,
+                        ScaleColorAlpha(IM_COL32(245, 190, 190, 255), entityAlpha),
+                        failText);
                 }
             }
 
@@ -1658,17 +1817,24 @@ namespace RenderUtils {
 
                     int charIndexCounter = 0;
 
-                    auto DrawTextSpan = [&](const std::string& str, const ImVec2& pos, ImU32 col, bool bold) {
+                    const bool applyTextFonts = FontSystem::ShouldApply(registry, entity, FontApplyTarget::Text);
+                    TextLayout::FontResolver fontResolver = {};
+                    if (applyTextFonts) {
+                        fontResolver = [&](const std::string& requestedKey) {
+                            return FontSystem::ResolveEntityFont(registry, entity, requestedKey);
+                        };
+                    }
+
+                    auto DrawTextSpan = [&](const std::string& str, const ImVec2& pos, ImU32 col, bool bold, ImFont* spanFont) {
                         const ImU32 spanColor = ScaleColorAlpha(col, entityAlpha);
                         if (textComp.CharacterTransformCallback) {
                              float currentX = pos.x;
-                             ImFont* font = ImGui::GetFont();
-                             float fontSize = ImGui::GetFontSize();
+                             ImFont* font = spanFont ? spanFont : ImGui::GetFont();
 
                              for (size_t i = 0; i < str.length(); ++i) {
                                  char c = str[i];
                                  char s[2] = { c, 0 };
-                                 ImVec2 charSize = ImGui::CalcTextSize(s);
+                                 ImVec2 charSize = FontSystem::CalcTextSize(font, s);
                                  
                                  // Initial State
                                  ImVec2 charPos = ImVec2(currentX, pos.y);
@@ -1681,11 +1847,11 @@ namespace RenderUtils {
                                  charColor = ScaleColorAlpha(charColor, entityAlpha);
                                  
                                  if (rotation == 0.0f && scale == 1.0f) {
-                                     draw_list->AddText(charPos, charColor, s);
+                                     FontSystem::AddText(draw_list, font, charPos, charColor, s);
                                  } else {
                                      // Custom Rotation/Scale
                                      int vtx_start = draw_list->_VtxCurrentIdx;
-                                     draw_list->AddText(font, fontSize * scale, charPos, charColor, s);
+                                     FontSystem::AddText(draw_list, font, charPos, charColor, s, scale);
                                      int vtx_end = draw_list->_VtxCurrentIdx;
                                      
                                      if (rotation != 0.0f) {
@@ -1710,10 +1876,10 @@ namespace RenderUtils {
                              }
                         } else {
                             if (bold) {
-                                draw_list->AddText(ImVec2(pos.x + 1, pos.y), spanColor, str.c_str());
-                                draw_list->AddText(pos, spanColor, str.c_str());
+                                FontSystem::AddText(draw_list, spanFont, ImVec2(pos.x + 1, pos.y), spanColor, str.c_str());
+                                FontSystem::AddText(draw_list, spanFont, pos, spanColor, str.c_str());
                             } else {
-                                draw_list->AddText(pos, spanColor, str.c_str());
+                                FontSystem::AddText(draw_list, spanFont, pos, spanColor, str.c_str());
                             }
                             charIndexCounter += (int)str.length();
                         }
@@ -1723,7 +1889,7 @@ namespace RenderUtils {
                     float startX = text_start_pos.x;
                     
                     // Use shared layout logic
-                    std::vector<TextLayout::TextLayoutLine> lines = TextLayout::CalculateLayout(textComp, availableWidth);
+                    std::vector<TextLayout::TextLayoutLine> lines = TextLayout::CalculateLayout(textComp, availableWidth, fontResolver);
 
                     // Update Scroll Content Height dynamically
                     if (registry.any_of<ScrollComponent>(entity)) {
@@ -1758,7 +1924,7 @@ namespace RenderUtils {
 
                         float currentX = startX + xOffset;
                         for (const auto& span : line.Spans) {
-                            DrawTextSpan(span.Text, ImVec2(currentX, cursor.y), span.Color, span.Bold);
+                            DrawTextSpan(span.Text, ImVec2(currentX, cursor.y), span.Color, span.Bold, span.Font);
                             currentX += span.Size.x;
                             if (textComp.Alignment == TextAlign::Justify) {
                                 currentX += extraSpacing;
@@ -1917,15 +2083,17 @@ namespace RenderUtils {
                 draw_list->PushClipRect(ImVec2(p_min.x + 4, p_min.y), ImVec2(p_max.x - 4, p_max.y), true);
                 const char* displayStr = textInput.Buffer.empty() ? textInput.Placeholder.c_str() : textInput.Buffer.c_str();
                 ImU32 textCol = textInput.Buffer.empty() ? IM_COL32(150, 150, 150, 255) : IM_COL32(255, 255, 255, 255);
-                float textH = ImGui::GetFontSize();
+                const bool applyInputFonts = FontSystem::ShouldApply(registry, entity, FontApplyTarget::TextInput);
+                ImFont* inputFont = applyInputFonts ? FontSystem::ResolveEntityFont(registry, entity) : nullptr;
+                float textH = inputFont ? inputFont->FontSize : ImGui::GetFontSize();
                 float textY = p_min.y + (p_max.y - p_min.y) * 0.5f - textH * 0.5f;
                 ImVec2 textPos = ImVec2(p_min.x + 5, textY);
-                draw_list->AddText(textPos, ScaleColorAlpha(textCol, entityAlpha), displayStr);
+                FontSystem::AddText(draw_list, inputFont, textPos, ScaleColorAlpha(textCol, entityAlpha), displayStr);
                 if (focused && (int(ImGui::GetTime() * 2) % 2 == 0)) {
                     // Correctly position cursor based on CursorPos index
                     // (std::min) prevents macro expansion on Windows
                     std::string sub = textInput.Buffer.substr(0, (std::min)((size_t)textInput.CursorPos, textInput.Buffer.length()));
-                    ImVec2 subSize = ImGui::CalcTextSize(sub.c_str());
+                    ImVec2 subSize = FontSystem::CalcTextSize(inputFont, sub.c_str());
                     float cursorX = textPos.x + subSize.x;
                     draw_list->AddLine(
                         ImVec2(cursorX, p_min.y + 4),
@@ -1941,6 +2109,8 @@ namespace RenderUtils {
                 const int optionCount = static_cast<int>(options.Options.size());
                 if (optionCount > 0) {
                     const float topInset = WindowHeaderSystem::GetContentTopInset(registry, entity);
+                    const bool applyOptionFonts = FontSystem::ShouldApply(registry, entity, FontApplyTarget::Options);
+                    ImFont* optionFont = applyOptionFonts ? FontSystem::ResolveEntityFont(registry, entity) : nullptr;
                     ImVec2 optionMin = ImVec2(
                         p_min.x + style.ContentPaddingX,
                         p_min.y + style.ContentPaddingY + topInset);
@@ -1980,12 +2150,14 @@ namespace RenderUtils {
                             }
 
                             const std::string& label = options.Options[static_cast<size_t>(i)];
-                            ImVec2 textSize = ImGui::CalcTextSize(label.c_str());
+                            ImVec2 textSize = FontSystem::CalcTextSize(optionFont, label);
                             ImVec2 textPos = ImVec2(
                                 segMin.x + (segmentWidth - textSize.x) * 0.5f,
                                 segMin.y + (height - textSize.y) * 0.5f
                             );
-                            draw_list->AddText(
+                            FontSystem::AddText(
+                                draw_list,
+                                optionFont,
                                 textPos,
                                 isSelected
                                     ? IM_COL32(255, 255, 255, static_cast<int>(245.0f * entityAlpha))
@@ -2050,7 +2222,7 @@ namespace RenderUtils {
                 ImVec2 center = ImVec2(p_min.x + transform.Size.x * 0.5f, p_min.y + transform.Size.y * 0.5f);
                 RotateVertices(draw_list, vtx_idx_start, vtx_idx_end, center, transform.Rotation);
             }
-        });
+        }
 
         // Commit Selection (if any clicked)
         if (DebugMode && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
@@ -2158,16 +2330,50 @@ namespace RenderUtils {
             const float nowSec = static_cast<float>(ImGui::GetTime());
             state.ElapsedSec = (std::max)(0.0f, nowSec - state.StartTimeSec);
 
+            auto buildCombinedProgress = [&](entt::registry& reg) {
+                const Components::ImageLoaderProgress imageProgress = Components::ImageLoaderSystem::QueryProgress(reg);
+                const FontLoadProgress fontProgress = FontSystem::QueryProgress(reg);
+
+                Components::ImageLoaderProgress combined;
+                combined.totalRequired = imageProgress.totalRequired + fontProgress.totalRequired;
+                combined.readyRequired = imageProgress.readyRequired + fontProgress.readyRequired;
+                combined.failedRequired = imageProgress.failedRequired + fontProgress.failedRequired;
+                combined.loadingRequired = imageProgress.loadingRequired + fontProgress.loadingRequired;
+                combined.done = imageProgress.done && fontProgress.done;
+
+                if (!imageProgress.currentLabel.empty()) {
+                    combined.currentLabel = imageProgress.currentLabel;
+                } else {
+                    combined.currentLabel = fontProgress.currentLabel;
+                }
+
+                if (combined.totalRequired > 0) {
+                    const int completed = combined.readyRequired + combined.failedRequired;
+                    combined.percent = static_cast<float>(completed) / static_cast<float>(combined.totalRequired);
+                } else {
+                    combined.percent = 1.0f;
+                }
+                if (combined.percent < 0.0f) {
+                    combined.percent = 0.0f;
+                }
+                if (combined.percent > 1.0f) {
+                    combined.percent = 1.0f;
+                }
+
+                return combined;
+            };
+
             if (config.ModeValue == Mode::BlockOnRequiredImages && !state.Completed) {
                 if (config.PriorityValue == Priority::ImagesFirst) {
                     Components::ImageLoaderSystem::Update(registry);
+                    FontSystem::Update(registry);
                     UIRenderer::ResolveTransforms(registry);
                     UIRenderer::ResolveDepth(registry);
                 } else {
                     UIRenderer::Update(registry, deltaTime);
                 }
 
-                state.Progress = Components::ImageLoaderSystem::QueryProgress(registry);
+                state.Progress = buildCombinedProgress(registry);
                 if (state.Progress.done) {
                     state.Completed = true;
                     state.SummaryLine =
@@ -2190,7 +2396,7 @@ namespace RenderUtils {
             }
 
             UIRenderer::Update(registry, deltaTime);
-            state.Progress = Components::ImageLoaderSystem::QueryProgress(registry);
+            state.Progress = buildCombinedProgress(registry);
             if (state.Completed && state.SummaryLine.empty()) {
                 state.SummaryLine =
                     "Startup complete: " + std::to_string(state.Progress.readyRequired) + " ready, " +

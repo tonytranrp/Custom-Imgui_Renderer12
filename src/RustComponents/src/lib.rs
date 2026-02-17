@@ -67,8 +67,16 @@ enum FetchState {
     Failed,
 }
 
+enum FetchBytesState {
+    Loading,
+    Ready(Vec<u8>),
+    Failed,
+}
+
 lazy_static! {
     static ref PENDING_REQUESTS: Mutex<HashMap<u64, Arc<Mutex<FetchState>>>> =
+        Mutex::new(HashMap::new());
+    static ref PENDING_BYTE_REQUESTS: Mutex<HashMap<u64, Arc<Mutex<FetchBytesState>>>> =
         Mutex::new(HashMap::new());
 }
 
@@ -122,6 +130,7 @@ pub extern "C" fn cancel_fetch_request(id: u64) {
         return;
     }
     PENDING_REQUESTS.lock().unwrap().remove(&id);
+    PENDING_BYTE_REQUESTS.lock().unwrap().remove(&id);
 }
 
 fn decode_media(bytes: &[u8]) -> Result<FetchMediaResult, String> {
@@ -252,6 +261,39 @@ pub unsafe extern "C" fn start_fetch_media(source: *const c_char, source_kind: i
         *state_guard = match result {
             Ok(payload) => FetchState::Ready(payload),
             Err(_) => FetchState::Failed,
+        };
+    });
+
+    id
+}
+
+#[no_mangle]
+/// # Safety
+/// `source` must be a valid null-terminated C string pointer.
+pub unsafe extern "C" fn start_fetch_bytes(source: *const c_char, source_kind: i32) -> u64 {
+    if source.is_null() {
+        return 0;
+    }
+
+    let c_str = CStr::from_ptr(source);
+    let source_str = match c_str.to_str() {
+        Ok(s) => s.to_string(),
+        Err(_) => return 0,
+    };
+
+    let id = NEXT_ID.fetch_add(1, Ordering::SeqCst);
+    let state = Arc::new(Mutex::new(FetchBytesState::Loading));
+    PENDING_BYTE_REQUESTS
+        .lock()
+        .unwrap()
+        .insert(id, state.clone());
+
+    thread::spawn(move || {
+        let result = load_source_bytes(&source_str, source_kind);
+        let mut state_guard = state.lock().unwrap();
+        *state_guard = match result {
+            Ok(bytes) => FetchBytesState::Ready(bytes),
+            Err(_) => FetchBytesState::Failed,
         };
     });
 
@@ -393,6 +435,63 @@ pub unsafe extern "C" fn check_fetch_media_status_ex(
                     FetchStatusCode::Ready as i32
                 }
             }
+        }
+    }
+}
+
+#[no_mangle]
+/// # Safety
+/// All output pointers are optional but, when non-null, must point to writable
+/// memory for their corresponding types.
+pub unsafe extern "C" fn check_fetch_bytes_status_ex(
+    id: u64,
+    out_data: *mut *mut u8,
+    out_len: *mut usize,
+) -> i32 {
+    if !out_data.is_null() {
+        *out_data = std::ptr::null_mut();
+    }
+    if !out_len.is_null() {
+        *out_len = 0;
+    }
+
+    let state_arc = {
+        let requests = PENDING_BYTE_REQUESTS.lock().unwrap();
+        if let Some(arc) = requests.get(&id) {
+            arc.clone()
+        } else {
+            return FetchStatusCode::InvalidId as i32;
+        }
+    };
+
+    let mut state_guard = state_arc.lock().unwrap();
+    match std::mem::replace(&mut *state_guard, FetchBytesState::Loading) {
+        FetchBytesState::Loading => {
+            *state_guard = FetchBytesState::Loading;
+            FetchStatusCode::Loading as i32
+        }
+        FetchBytesState::Failed => {
+            drop(state_guard);
+            PENDING_BYTE_REQUESTS.lock().unwrap().remove(&id);
+            FetchStatusCode::Failed as i32
+        }
+        FetchBytesState::Ready(bytes) => {
+            drop(state_guard);
+            PENDING_BYTE_REQUESTS.lock().unwrap().remove(&id);
+
+            let mut boxed_slice = bytes.into_boxed_slice();
+            let len = boxed_slice.len();
+            let ptr = boxed_slice.as_mut_ptr();
+            std::mem::forget(boxed_slice);
+
+            if !out_data.is_null() {
+                *out_data = ptr;
+            }
+            if !out_len.is_null() {
+                *out_len = len;
+            }
+
+            FetchStatusCode::Ready as i32
         }
     }
 }
