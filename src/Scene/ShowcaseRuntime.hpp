@@ -10,6 +10,11 @@ namespace Scene {
         struct Options {
             bool EnableImageLoading = true;
             bool EnableShaderLoading = true;
+            bool ForceImmediateStartup = false;
+            bool RelaxRequiredFonts = false;
+            bool RelaxRequiredImages = false;
+            bool StripLocalPathMediaSources = false;
+            bool PreferRemoteBodyFont = false;
         };
 
         void SetOptions(const Options& options);

@@ -329,17 +329,22 @@ namespace RenderUtils {
                 }
 
                 ImFont* font = nullptr;
-                bool usedPendingBytes = false;
                 if (!runtime->PendingBytes.empty()) {
-                    usedPendingBytes = true;
-                    if (!TryAddFontPayload(*runtime, io.Fonts, runtime->PendingBytes, font)) {
-                        runtime->LastError = "font atlas rejected fetched payload";
-                        runtime->PendingBytes.clear();
-                        usedPendingBytes = false;
-                    }
-                }
+                    std::vector<std::uint8_t> previousBytes = std::move(runtime->Bytes);
+                    runtime->Bytes = std::move(runtime->PendingBytes);
+                    runtime->PendingBytes.clear();
 
-                if (!font && !runtime->Bytes.empty()) {
+                    if (!TryAddFontPayload(*runtime, io.Fonts, runtime->Bytes, font)) {
+                        runtime->LastError = "font atlas rejected fetched payload";
+                        runtime->Bytes.clear();
+                        if (!previousBytes.empty() && TryAddFontPayload(*runtime, io.Fonts, previousBytes, font)) {
+                            runtime->Bytes = std::move(previousBytes);
+                            runtime->LastError.clear();
+                        } else {
+                            previousBytes.clear();
+                        }
+                    }
+                } else if (!runtime->Bytes.empty()) {
                     if (!TryAddFontPayload(*runtime, io.Fonts, runtime->Bytes, font)) {
                         runtime->LastError = "font atlas rejected cached payload";
                         runtime->Bytes.clear();
@@ -348,10 +353,6 @@ namespace RenderUtils {
 
                 runtime->AtlasFont = font;
                 runtime->AtlasGeneration = font ? pendingGeneration : 0;
-                if (usedPendingBytes && font) {
-                    runtime->Bytes = runtime->PendingBytes;
-                    runtime->PendingBytes.clear();
-                }
                 if (!font && runtime->Bytes.empty() && runtime->PendingBytes.empty()) {
                     runtime->TerminalFailure = true;
                 }

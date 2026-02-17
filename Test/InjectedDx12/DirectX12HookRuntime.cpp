@@ -120,8 +120,13 @@ namespace TestInjectedDx12::HookRuntime {
         }
 
         Scene::ShowcaseRuntime::Options sceneOptions;
-        sceneOptions.EnableImageLoading = false;
+        sceneOptions.EnableImageLoading = true;
         sceneOptions.EnableShaderLoading = false;
+        sceneOptions.ForceImmediateStartup = true;
+        sceneOptions.RelaxRequiredFonts = true;
+        sceneOptions.RelaxRequiredImages = true;
+        sceneOptions.StripLocalPathMediaSources = true;
+        sceneOptions.PreferRemoteBodyFont = true;
         s_ShowcaseRuntime.SetOptions(sceneOptions);
 
         DX12Init::ExternalOverlayRuntime::Config config;
@@ -129,7 +134,7 @@ namespace TestInjectedDx12::HookRuntime {
         config.EnableRawInputFallback = true;
         config.AutoInitImGui = true;
         config.AutoInitShaderSystem = false;
-        config.AllowFontAtlasRebuild = false;
+        config.AllowFontAtlasRebuild = true;
         config.AllowShaderSystem = false;
         config.OnSceneSetup = [](HWND hWnd) {
             s_ShowcaseRuntime.Setup(hWnd);

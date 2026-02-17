@@ -111,7 +111,7 @@ What it does:
 - Handles swapchain resize by tearing down and reinitializing hook-side resources.
 - Uses strict queue ownership checks and per-backbuffer fence synchronization before allocator reuse.
 - Uses always-capture input policy in injected mode so dragging/clicking remains reliable.
-- Disables image-loader components and shader-loading components in injected mode for host stability.
+- Enables font/image loading in injected mode while keeping shader loading disabled by default for host stability.
 
 Runtime scope:
 - DX12 hosts only for this test path.
@@ -120,13 +120,21 @@ Runtime scope:
 - Debug and Release test DLL builds are supported; Release is recommended for runtime validation.
 
 Safety defaults in injected mode:
-- `AllowFontAtlasRebuild=false`
+- `AllowFontAtlasRebuild=true`
 - `AllowShaderSystem=false`
 - `CaptureHostInputAlways=true`
 - Raw fallback input polling enabled (`GetCursorPos` + `GetAsyncKeyState`) before `NewFrame`.
 - `Scene::ShowcaseRuntime::Options` defaults for injected path:
-  - `EnableImageLoading=false`
+  - `EnableImageLoading=true`
   - `EnableShaderLoading=false`
+  - `ForceImmediateStartup=true`
+  - `RelaxRequiredFonts=true`
+  - `RelaxRequiredImages=true`
+  - `StripLocalPathMediaSources=true`
+  - `PreferRemoteBodyFont=true`
+- Startup is non-blocking in injected mode (`ImmediateUI` policy).
+- Local-path media sources are stripped in injected mode; URL sources are retained.
+- Font policy is fallback-first: default ImGui font is allowed until injected body faces become ready.
 - Known conflicting overlay modules fail closed (hook auto-disables):
   - `graphics-hook64.dll`
   - `RTSSHooks64.dll`

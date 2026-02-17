@@ -35,6 +35,10 @@ namespace Scene {
         RenderUtils::StartupRuntime::Config startupConfig;
         RenderUtils::StartupRuntime::State startupState;
 
+        bool IsHttpSourceValue(const std::string& value) {
+            return value.rfind("https://", 0) == 0 || value.rfind("http://", 0) == 0;
+        }
+
         void ApplyRuntimeFeatureRestrictions(entt::registry& registry) {
             if (!g_RuntimeOptions.EnableShaderLoading) {
                 auto shaderView = registry.view<RenderUtils::ShaderComponent>();
@@ -74,6 +78,16 @@ namespace Scene {
                 }
             }
 
+            if (g_RuntimeOptions.RelaxRequiredFonts) {
+                auto fontsView = registry.view<RenderUtils::FontsComponent>();
+                for (auto entity : fontsView) {
+                    auto& fonts = fontsView.get<RenderUtils::FontsComponent>(entity);
+                    for (auto& face : fonts.Faces) {
+                        face.StartupRequired = false;
+                    }
+                }
+            }
+
             if (!g_RuntimeOptions.EnableImageLoading) {
                 auto imageView = registry.view<Components::ImageLoader>();
                 std::vector<entt::entity> imageEntities;
@@ -87,6 +101,42 @@ namespace Scene {
                         registry.remove<Components::ImageLoader>(entity);
                     }
                 }
+                return;
+            }
+
+            bool requestImageRestart = false;
+            auto imageView = registry.view<Components::ImageLoader>();
+            for (auto entity : imageView) {
+                auto& loader = imageView.get<Components::ImageLoader>(entity);
+                if (g_RuntimeOptions.RelaxRequiredImages && loader.StartupRequired) {
+                    loader.StartupRequired = false;
+                }
+
+                if (!g_RuntimeOptions.StripLocalPathMediaSources || loader.Sources.empty()) {
+                    continue;
+                }
+
+                std::vector<Components::ImageLoader::ImageSource> filteredSources;
+                filteredSources.reserve(loader.Sources.size());
+                for (const auto& source : loader.Sources) {
+                    if (source.Type == Components::ImageLoader::ImageSourceType::Url || IsHttpSourceValue(source.Value)) {
+                        filteredSources.push_back(source);
+                    }
+                }
+
+                if (filteredSources.size() == loader.Sources.size()) {
+                    continue;
+                }
+
+                loader.Sources = std::move(filteredSources);
+                if (loader.ActiveSourceIndex < 0 || loader.ActiveSourceIndex >= static_cast<int>(loader.Sources.size())) {
+                    loader.ActiveSourceIndex = 0;
+                }
+                requestImageRestart = true;
+            }
+
+            if (requestImageRestart) {
+                Components::ImageLoaderSystem::RequestRestart(registry, false);
             }
         }
     }
@@ -103,6 +153,15 @@ namespace Scene {
             g_RequestShaderRecompile = false;
             startupConfig = RenderUtils::StartupRuntime::Config{};
             RenderUtils::StartupRuntime::Reset(startupState);
+            if (g_RuntimeOptions.ForceImmediateStartup) {
+                startupConfig.ModeValue = RenderUtils::StartupRuntime::Mode::ImmediateUI;
+                startupState.Initialized = true;
+                startupState.Completed = true;
+                startupState.TimedOut = false;
+                startupState.StartTimeSec = ImGui::GetCurrentContext() ? static_cast<float>(ImGui::GetTime()) : 0.0f;
+                startupState.ElapsedSec = 0.0f;
+                startupState.SummaryLine = "Startup forced to Immediate UI profile.";
+            }
 
             RenderUtils::UIRenderer::Init(g_registry);
             RenderUtils::ShaderSystem::RegisterUniformResolver(
@@ -179,8 +238,10 @@ namespace Scene {
                 .With<RenderUtils::ClipComponent>(RenderUtils::ClipComponent().SetClipChildren(true))
                 .With<RenderUtils::FontsComponent>([]() {
                     RenderUtils::FontsComponent fonts;
+                    const bool preferRemoteBodyFace = g_RuntimeOptions.PreferRemoteBodyFont;
+                    const bool relaxRequiredFonts = g_RuntimeOptions.RelaxRequiredFonts;
                     fonts
-                        .SetDefaultFace("ui.body")
+                        .SetDefaultFace(preferRemoteBodyFace ? "ui.body.web" : "ui.body")
                         .SetInheritFromParent(true)
                         .SetApplyToText(true)
                         .SetApplyToTextInput(true)
@@ -190,7 +251,17 @@ namespace Scene {
                         .SetReloadPollSeconds(1.0f);
                     fonts.AddPathFace("ui.body", "C:/Windows/Fonts/segoeui.ttf", 17.0f)
                         .SetGlyphPreset(RenderUtils::FontGlyphPreset::Default)
-                        .SetStartupRequired(true);
+                        .SetStartupRequired(!relaxRequiredFonts);
+                    if (preferRemoteBodyFace) {
+                        fonts.AddUrlFace(
+                            "ui.body.web",
+                            "https://raw.githubusercontent.com/google/fonts/main/ofl/ibmplexsans/IBMPlexSans-Regular.ttf",
+                            17.0f)
+                            .SetGlyphPreset(RenderUtils::FontGlyphPreset::Default)
+                            .SetMaxBytes(8u * 1024u * 1024u)
+                            .SetRetryPolicy(2, 350.0f)
+                            .SetStartupRequired(false);
+                    }
                     fonts.AddPathFace("ui.mono", "C:/Windows/Fonts/consola.ttf", 16.0f)
                         .SetGlyphPreset(RenderUtils::FontGlyphPreset::Default);
                     fonts.AddUrlFace(
@@ -961,11 +1032,28 @@ namespace Scene {
             entt::entity showcaseEnt = findEntity("ModMenuShowcase");
             entt::entity fontSwitchOptionsEnt = findEntity("OverviewFontSwitchOptions");
             entt::entity fontSwitchStatusEnt = findEntity("OverviewFontSwitchStatus");
+            std::string runtimeActiveFaceLabel = "<ImGui Default>";
+            RenderUtils::FontFaceRuntimeState runtimeActiveFaceState = RenderUtils::FontFaceRuntimeState::Ready;
             if (g_registry.valid(showcaseEnt) && g_registry.any_of<RenderUtils::FontsComponent>(showcaseEnt)) {
                 auto& showcaseFonts = g_registry.get<RenderUtils::FontsComponent>(showcaseEnt);
                 if (!showcaseFonts.DefaultFaceKey.empty() && !showcaseFonts.HasFace(showcaseFonts.DefaultFaceKey)) {
                     showcaseFonts.DefaultFaceKey.clear();
                 }
+
+                const std::string bodyLocalFaceKey = "ui.body";
+                const std::string bodyWebFaceKey = "ui.body.web";
+                auto queryFaceState = [](const std::vector<RenderUtils::FontFaceRuntimeInfo>& infos, const std::string& key) {
+                    if (key.empty()) {
+                        return RenderUtils::FontFaceRuntimeState::Ready;
+                    }
+                    for (const auto& info : infos) {
+                        if (info.Key == key) {
+                            return info.State;
+                        }
+                    }
+                    return RenderUtils::FontFaceRuntimeState::Missing;
+                };
+
                 std::vector<std::string> desiredOptions;
                 desiredOptions.emplace_back("<ImGui Default>");
                 const std::vector<std::string> faceKeys = showcaseFonts.GetFaceKeys();
@@ -994,32 +1082,48 @@ namespace Scene {
                     if (requestedKey != showcaseFonts.DefaultFaceKey) {
                         showcaseFonts.SetDefaultFaceSafe(requestedKey);
                     }
+                }
 
+                std::vector<RenderUtils::FontFaceRuntimeInfo> infos =
+                    RenderUtils::FontSystem::QueryEntityFontFaces(g_registry, showcaseEnt, false);
+                if (g_RuntimeOptions.PreferRemoteBodyFont) {
+                    const bool managesBodyDefault = showcaseFonts.DefaultFaceKey.empty() ||
+                        showcaseFonts.DefaultFaceKey == bodyLocalFaceKey ||
+                        showcaseFonts.DefaultFaceKey == bodyWebFaceKey;
+                    if (managesBodyDefault) {
+                        const RenderUtils::FontFaceRuntimeState bodyLocalState = queryFaceState(infos, bodyLocalFaceKey);
+                        const RenderUtils::FontFaceRuntimeState bodyWebState = queryFaceState(infos, bodyWebFaceKey);
+                        if (bodyWebState == RenderUtils::FontFaceRuntimeState::Ready && showcaseFonts.HasFace(bodyWebFaceKey)) {
+                            if (showcaseFonts.DefaultFaceKey != bodyWebFaceKey) {
+                                showcaseFonts.SetDefaultFaceSafe(bodyWebFaceKey);
+                            }
+                        } else if (bodyLocalState == RenderUtils::FontFaceRuntimeState::Ready &&
+                                   showcaseFonts.HasFace(bodyLocalFaceKey) &&
+                                   showcaseFonts.DefaultFaceKey.empty()) {
+                            showcaseFonts.SetDefaultFaceSafe(bodyLocalFaceKey);
+                        } else if (showcaseFonts.DefaultFaceKey == bodyLocalFaceKey &&
+                                   bodyLocalState != RenderUtils::FontFaceRuntimeState::Ready) {
+                            showcaseFonts.DefaultFaceKey.clear();
+                        }
+                    }
+                }
+
+                infos = RenderUtils::FontSystem::QueryEntityFontFaces(g_registry, showcaseEnt, false);
+                if (g_registry.valid(fontSwitchOptionsEnt) && g_registry.any_of<RenderUtils::OptionsComponent>(fontSwitchOptionsEnt)) {
+                    auto& options = g_registry.get<RenderUtils::OptionsComponent>(fontSwitchOptionsEnt);
                     const int syncedIndex = computeFontOptionIndex(options.Options, showcaseFonts.DefaultFaceKey);
                     if (options.SelectedIndex != syncedIndex) {
                         options.SelectedIndex = syncedIndex;
                     }
                 }
 
-                RenderUtils::FontFaceRuntimeState activeState = RenderUtils::FontFaceRuntimeState::Ready;
-                if (!showcaseFonts.DefaultFaceKey.empty()) {
-                    activeState = RenderUtils::FontFaceRuntimeState::Missing;
-                    const std::vector<RenderUtils::FontFaceRuntimeInfo> infos =
-                        RenderUtils::FontSystem::QueryEntityFontFaces(g_registry, showcaseEnt, false);
-                    for (const auto& info : infos) {
-                        if (info.Key == showcaseFonts.DefaultFaceKey) {
-                            activeState = info.State;
-                            break;
-                        }
-                    }
-                }
+                const RenderUtils::FontFaceRuntimeState activeState = queryFaceState(infos, showcaseFonts.DefaultFaceKey);
+                runtimeActiveFaceLabel = showcaseFonts.DefaultFaceKey.empty() ? "<ImGui Default>" : showcaseFonts.DefaultFaceKey;
+                runtimeActiveFaceState = activeState;
 
                 if (g_registry.valid(fontSwitchStatusEnt) && g_registry.any_of<RenderUtils::TextComponent>(fontSwitchStatusEnt)) {
                     auto& statusText = g_registry.get<RenderUtils::TextComponent>(fontSwitchStatusEnt);
-                    const std::string activeFaceLabel = showcaseFonts.DefaultFaceKey.empty()
-                        ? "<ImGui Default>"
-                        : showcaseFonts.DefaultFaceKey;
-                    const std::string nextText = "Active: " + activeFaceLabel + " (" + fontStateLabel(activeState) + ")";
+                    const std::string nextText = "Active: " + runtimeActiveFaceLabel + " (" + fontStateLabel(activeState) + ")";
                     if (statusText.RawText != nextText) {
                         statusText.RawText = nextText;
                     }
@@ -1288,6 +1392,8 @@ namespace Scene {
             }
 
             const Components::ImageLoaderDebugStats loaderStats = Components::ImageLoaderSystem::QueryDebugStats(g_registry);
+            const Components::ImageLoaderProgress imageProgress = Components::ImageLoaderSystem::QueryProgress(g_registry);
+            const RenderUtils::FontLoadProgress fontProgress = RenderUtils::FontSystem::QueryProgress(g_registry);
 
             auto setPanelText = [](const char* name, const std::string& value, ImU32 color) {
                 entt::entity entity = RenderUtils::UIRenderer::FindEntityByName(g_registry, name);
@@ -1338,7 +1444,16 @@ namespace Scene {
                 "Descriptors Used/Free: " + std::to_string(loaderStats.descriptorUsed) + " / " + std::to_string(loaderStats.descriptorFree) + "\n" +
                 "Deferred (res/srv): " + std::to_string(loaderStats.deferredResourceReleases) + " / " + std::to_string(loaderStats.deferredDescriptorRecycles) + "\n" +
                 "Pending Fetches: " + std::to_string(loaderStats.pendingFetches) +
-                "  Uploads: " + std::to_string(loaderStats.uploadedFramesLastTick) + " frames";
+                "  Uploads: " + std::to_string(loaderStats.uploadedFramesLastTick) + " frames\n" +
+                "Font: " + runtimeActiveFaceLabel + " (" + fontStateLabel(runtimeActiveFaceState) + ")\n" +
+                "Image req R/L/F: " +
+                std::to_string(imageProgress.readyRequired) + "/" +
+                std::to_string(imageProgress.loadingRequired) + "/" +
+                std::to_string(imageProgress.failedRequired) +
+                "  Font req R/L/F: " +
+                std::to_string(fontProgress.readyRequired) + "/" +
+                std::to_string(fontProgress.loadingRequired) + "/" +
+                std::to_string(fontProgress.failedRequired);
             setPanelText("SysLoaderStatsText", loaderText, IM_COL32(195, 212, 235, 255));
 
             int shaderTotal = 0;

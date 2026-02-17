@@ -534,7 +534,8 @@ namespace DX12Init {
 
             D3D12_DESCRIPTOR_HEAP_DESC srvDesc = {};
             srvDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-            srvDesc.NumDescriptors = 128;
+            // Headroom for ImGui + font atlas rebuilds + image loader media descriptors in injected mode.
+            srvDesc.NumDescriptors = 512;
             srvDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
             if (FAILED(s_Device->CreateDescriptorHeap(&srvDesc, IID_PPV_ARGS(&s_SRVHeap))) || s_SRVHeap == nullptr) {
                 return false;
